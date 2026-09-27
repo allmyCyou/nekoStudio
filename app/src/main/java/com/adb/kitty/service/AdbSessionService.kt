@@ -765,7 +765,7 @@ class AdbSessionService : Service() {
                     ipcOutputStream = ParcelFileDescriptor.AutoCloseOutputStream(writeSide),
                     onPumpComplete = { stream ->
                         val exitCode = runCatching { activeProcess.waitFor() }.getOrDefault(-1)
-                        val exitMsg = "\n[进程结束，状态码: $exitCode]\n".toByteArray(Charsets.UTF_8)
+                        val exitMsg = "\n[Shell] 进程结束，状态码: $exitCode\n".toByteArray(Charsets.UTF_8)
                         runCatching {
                             stream.write(exitMsg)
                             stream.flush()
