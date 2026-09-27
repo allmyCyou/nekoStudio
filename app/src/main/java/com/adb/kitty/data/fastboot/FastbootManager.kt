@@ -22,6 +22,7 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 
 @Keep
 data class FastbootConfig(
@@ -92,26 +93,59 @@ enum class UsbSpeedMode(
         ): UsbSpeedMode {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && usbManager != null) {
                 try {
-                    val ports = usbManager.ports
-                    for (port in ports) {
-                        val status = port.status
-                        if (status != null && status.isConnected) {
-                            return when (status.currentUsbSpeed) {
-                                API_USB_SPEED_HIGH -> SPEED_2_0
-                                API_USB_SPEED_SUPER -> SPEED_3_0
-                                API_USB_SPEED_SUPER_PLUS -> SPEED_3_1_PLUS
-                                else -> getFallbackSpeed(epOut)
+                    // 使用 HiddenApiBypass 绕过系统限制调用 UsbManager.getPorts()
+                    val ports = HiddenApiBypass.invoke(
+                        UsbManager::class.java,
+                        usbManager,
+                        "getPorts"
+                    ) as? List<*>
+
+                    if (ports != null) {
+                        for (port in ports) {
+                            if (port == null) continue
+
+                            // 调用 UsbPort.getStatus()
+                            val status = HiddenApiBypass.invoke(
+                                port.javaClass,
+                                port,
+                                "getStatus"
+                            ) ?: continue
+
+                            // 调用 UsbPortStatus.isConnected()
+                            val isConnected = HiddenApiBypass.invoke(
+                                status.javaClass,
+                                status,
+                                "isConnected"
+                            ) as? Boolean ?: false
+
+                            if (isConnected) {
+                                // 调用 UsbPortStatus.getCurrentUsbSpeed()
+                                val currentUsbSpeed = HiddenApiBypass.invoke(
+                                    status.javaClass,
+                                    status,
+                                    "getCurrentUsbSpeed"
+                                ) as? Int ?: continue
+
+                                return when (currentUsbSpeed) {
+                                    API_USB_SPEED_HIGH -> SPEED_2_0
+                                    API_USB_SPEED_SUPER -> SPEED_3_0
+                                    API_USB_SPEED_SUPER_PLUS -> SPEED_3_1_PLUS
+                                    else -> getFallbackSpeed(epOut)
+                                }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    // 忽略底层系统权限差异，走硬件兜底
+                    // 无权限或非系统支持时，安全回退到硬件物理端点判断
                 }
             }
             return getFallbackSpeed(epOut)
         }
 
         private fun getFallbackSpeed(epOut: UsbEndpoint): UsbSpeedMode {
+            // 通过 USB Bulk OUT 端点的 maxPacketSize 兜底判断：
+            // USB 2.0 HighSpeed 包大小最大为 512 字节
+            // USB 3.0+ SuperSpeed 包大小一般为 1024 字节
             return if (epOut.maxPacketSize >= 1024) SPEED_3_0 else SPEED_2_0
         }
     }
