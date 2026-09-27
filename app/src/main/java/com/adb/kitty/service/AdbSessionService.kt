@@ -666,7 +666,7 @@ class AdbSessionService : Service() {
                 return@launch
             }
 
-            this@UsbFastbootService.usbConn = conn
+            this@AdbSessionService.usbConn = conn
             val serialNumber = runCatching { device.serialNumber }.getOrNull() ?: "unknown"
 
             when (mode) {
@@ -678,7 +678,7 @@ class AdbSessionService : Service() {
                         epIn = epIn,
                         responseChannel = responseChannel,
                         flashFolder = flashFolder,
-                        context = this@UsbFastbootService,
+                        context = this@AdbSessionService,
                         usbManager = usbManager,
                         usbDevice = device
                     ).apply {
