@@ -98,7 +98,9 @@ class FastbootManager(
                 val read = usbConn.bulkTransfer(epIn, buffer, buffer.size, 1000)
                 if (read > 0) {
                     val response = String(buffer, 0, read).trim()
-                    withContext(Dispatchers.Main) { log("FB >> $response") }
+                    withContext(Dispatchers.Main) {
+                        log("[INFO] FB >> $response")
+                    }
                     responseChannel.trySend(response)
                 }
             }
@@ -149,7 +151,9 @@ class FastbootManager(
                 if (parts.size >= 3) {
                     performFlash(parts[1], parts[2])
                 } else {
-                    withContext(Dispatchers.Main) { log("❌ 格式错误: flash 分区 文件名") }
+                    withContext(Dispatchers.Main) {
+                        log("[error] 格式: flash 分区 文件名")
+                    }
                 }
                 return@withContext
             }
@@ -157,7 +161,9 @@ class FastbootManager(
                 if (parts.size >= 2) {
                     performBoot(parts[1])
                 } else {
-                    withContext(Dispatchers.Main) { log("❌ 格式错误: boot 文件名") }
+                    withContext(Dispatchers.Main) {
+                        log("[error] 格式: boot 文件名")
+                    }
                 }
                 return@withContext
             }
@@ -188,22 +194,10 @@ class FastbootManager(
         }
 
         withContext(Dispatchers.Main) {
-            log("🚀 发送: $protocolCmd")
+            log("[INFO] 发送: $protocolCmd")
         }
 
         sendFastbootCommandDirect(protocolCmd)
-
-        val result = waitForTerminalResponse(10000) { infoText ->
-            log("FB << [系统] $infoText")
-        }
-
-        withContext(Dispatchers.Main) {
-            when (result.status) {
-                "OKAY" -> log("FB << OKAY: ${result.payload}")
-                "FAIL" -> log("❌ 指令被拒绝: ${result.payload}")
-                "TIMEOUT" -> log("⚠️ 无响应: ${result.payload}")
-            }
-        }
     }
 
     suspend fun performFlash(partition: String, inputPath: String) = withContext(Dispatchers.IO) {
@@ -212,7 +206,7 @@ class FastbootManager(
         val file = File(flashFolder, cleanFileName)
         if (!file.exists()) {
             withContext(Dispatchers.Main) { 
-                log("❌ 找不到镜像文件 -> $file.absolutePath") 
+                log("[error] 文件不存在 -> $file.absolutePath") 
             }
             return@withContext
         }
@@ -228,25 +222,29 @@ class FastbootManager(
         }
         
         withContext(Dispatchers.Main) { 
-            log("📂 准备刷入: ${file.name} -> 目标: $targetPartition")
-            log("📱 计算目标: $partition -> $targetPartition (Active Slot: ${activeSlot.ifEmpty { "N/A" }})")
+            log("[INFO] 准备刷入: ${file.name} -> 目标: $targetPartition")
+            log("[INFO] 计算目标: $partition -> $targetPartition (Active Slot: ${activeSlot.ifEmpty { "N/A" }})")
         }
         
         val isSparse = isSparseImage(file)
-        withContext(Dispatchers.Main) { log("镜像格式识别: ${if (isSparse) "Sparse Image" else "Raw Image"}") }
+        withContext(Dispatchers.Main) { log("[INFO] 镜像格式识别: ${if (isSparse) "Sparse Image" else "Raw Image"}") }
 
         val sizeHex = String.format("%08x", file.length())
-        withContext(Dispatchers.Main) { log("🚀 发送下载请求: $partition (大小: ${file.length()} bytes)") }
+        withContext(Dispatchers.Main) { log("[INFO] 发送下载请求: $partition (大小: ${file.length()} bytes)") }
     
         sendFastbootCommandDirect("download:$sizeHex")
     
         val handshake = waitForTerminalResponse(10000) { }
         if (handshake.status != "DATA") {
-            withContext(Dispatchers.Main) { log("❌ 下载请求被拒绝: ${handshake.payload}, 状态: ${handshake.status}") }
+            withContext(Dispatchers.Main) {
+                log("[error] 下载请求被拒绝: ${handshake.payload}, 状态: ${handshake.status}")
+            }
             return@withContext
         }
 
-        withContext(Dispatchers.Main) { log("⏳ 正在传输数据，请勿断开物理连接!") }
+        withContext(Dispatchers.Main) {
+            log("[INFO] 正在传输数据，请勿断开物理连接!")
+        }
         val buffer = ByteArray(65536)
         try {
             FileInputStream(file).use { fis ->
@@ -254,27 +252,31 @@ class FastbootManager(
                 while (fis.read(buffer).also { bytesRead = it } != -1) {
                     val written = usbConn.bulkTransfer(epOut, buffer, bytesRead, 5000)
                     if (written != bytesRead) {
-                        throw Exception("数据传输被中断 (发送字节数不匹配)")
+                        throw Exception("[error] 数据传输被中断 (发送字节数不匹配)")
                     }
                 }
             }
         } catch (e: Exception) {
-            withContext(Dispatchers.Main) { log("❌ 传输失败: ${e.message}") }
+            withContext(Dispatchers.Main) {
+                log("[error] 传输失败: ${e.message}")
+            }
             return@withContext
         }
 
         val downloadConfirm = waitForTerminalResponse(30000) { }
         if (downloadConfirm.status != "OKAY") {
-            withContext(Dispatchers.Main) { log("❌ 下载被拒绝: ${downloadConfirm.payload}, 状态: ${downloadConfirm.status}") }
+            withContext(Dispatchers.Main) {
+                log("[error] 下载被拒绝: ${downloadConfirm.payload}, 状态: ${downloadConfirm.status}")
+            }
             return@withContext
         }
 
-        withContext(Dispatchers.Main) { log("⚡ 触发刷写: flash:$targetPartition") }
+        withContext(Dispatchers.Main) {
+            log("[INFO] 触发刷写: flash:$targetPartition")
+        }
         sendFastbootCommandDirect("flash:$targetPartition")
     
-        val flashResult = waitForTerminalResponse(120000) { info ->
-            withContext(Dispatchers.Main) { log("FB << (bootloader) $info") }
-        }
+        val flashResult = waitForTerminalResponse(120000) { }
         
         val endTime = System.currentTimeMillis()
         val durationSeconds = (endTime - startTime) / 1000.0
@@ -283,19 +285,19 @@ class FastbootManager(
         withContext(Dispatchers.Main) {
             if (flashResult.status == "OKAY") {
                 val logMessage = StringBuilder()
-                logMessage.append("✅ 分区 $targetPartition 刷写完成\n")
-                logMessage.append("⏱️ 耗时: ${"%.2f".format(durationSeconds)}秒")
+                logMessage.append("[OKAY] 分区 $targetPartition 刷写完成\n")
+                logMessage.append("[INFO] 耗时: ${"%.2f".format(durationSeconds)}秒")
             
                 if (file.length() >= thresholdBytes && durationSeconds > 0) {
                     val fileSizeMB = file.length() / (1024.0 * 1024.0)
                     val speedMbps = fileSizeMB / durationSeconds
                     logMessage.append(" | 平均速度: ${"%.2f".format(speedMbps)} MB/s")
                 } else {
-                    logMessage.append("刷写的分区过小，因此不展示传输速度")
+                    logMessage.append("[INFO] 刷写的分区过小，因此不展示传输速度")
                 }
                 log(logMessage.toString())
             } else {
-                log("❌ 分区 $partition 刷写失败: ${flashResult.payload} (已耗时: ${"%.2f".format(durationSeconds)}秒)")
+                log("[error] 分区 $partition 刷写失败: ${flashResult.payload} (已耗时: ${"%.2f".format(durationSeconds)}秒)")
             }
         }
     }
@@ -307,37 +309,39 @@ class FastbootManager(
 
         if (fileName.endsWith(".xml", true) || fileName.endsWith(".txt", true) || fileName.endsWith(".py", true)) {
             withContext(Dispatchers.Main) { 
-                log("❌ 文件类型无法引导 (XML/TXT/PY)") 
+                log("[error] 文件类型无法被引导") 
             }
             return@withContext
         }
         
         if (!config.bootPartitions.contains(extension)) {
             withContext(Dispatchers.Main) { 
-                log("⚠️ 文件后缀 $extension 可能无法被设备引导，将尝试发送") 
+                log("[Warn] 文件后缀 $extension 可能无法被设备引导，将尝试发送") 
             }
         }
         
         if (!file.exists()) {
             withContext(Dispatchers.Main) { 
-                log("❌ 找不到文件 -> ${file.absolutePath}") 
+                log("[error] 找不到文件 -> ${file.absolutePath}") 
             }
             return@withContext
         }
 
         withContext(Dispatchers.Main) { 
-            log("🚀 准备临时引导 (RAM Boot): ${file.name}") 
+            log("[INFO] 准备临时引导 (RAM Boot): ${file.name}") 
         }
 
         try {
             val sizeHex = String.format("%08x", file.length())
-            withContext(Dispatchers.Main) { log("🚀 触发下载请求 (大小: ${file.length()} bytes)") }
+            withContext(Dispatchers.Main) {
+                log("[INFO] 触发下载请求 (大小: ${file.length()} bytes)")
+            }
             sendFastbootCommandDirect("download:$sizeHex")
         
             val handshake = waitForTerminalResponse(10000) { }
             if (handshake.status != "DATA") {
                 withContext(Dispatchers.Main) {
-                    log("❌ 下载被拒绝: ${handshake.payload}, 状态: ${handshake.status}")
+                    log("[error] 下载被拒绝: ${handshake.payload}, 状态: ${handshake.status}")
                 }
                 return@withContext
             }
@@ -347,17 +351,21 @@ class FastbootManager(
                 var bytesRead: Int
                 while (fis.read(buffer).also { bytesRead = it } != -1) {
                     val written = usbConn.bulkTransfer(epOut, buffer, bytesRead, 5000)
-                    if (written != bytesRead) throw Exception("数据传输被中断")
+                    if (written != bytesRead) throw Exception("[error] 数据传输被中断")
                 }
             }
 
             val downloadConfirm = waitForTerminalResponse(30000) { }
             if (downloadConfirm.status != "OKAY") {
-                withContext(Dispatchers.Main) { log("❌ 下载被拒绝: ${downloadConfirm.payload}, 状态: ${downloadConfirm.status}") }
+                withContext(Dispatchers.Main) {
+                    log("[error] 下载被拒绝: ${downloadConfirm.payload}, 状态: ${downloadConfirm.status}")
+                }
                 return@withContext
             }
 
-            withContext(Dispatchers.Main) { log("⚡ 触发 boot 发送请求") }
+            withContext(Dispatchers.Main) {
+                log("[INFO] 触发 boot 发送请求")
+            }
             sendFastbootCommandDirect("boot")
 
             val bootResult = waitForTerminalResponse(30000) { }
@@ -365,13 +373,15 @@ class FastbootManager(
 
             withContext(Dispatchers.Main) {
                 if (bootResult.status == "OKAY") {
-                    log("✅ 已成功发送 boot 指令 (耗时: ${"%.2f".format(duration)}秒)")
+                    log("[OKAY] 已成功发送 boot 指令 (耗时: ${"%.2f".format(duration)}秒)")
                 } else {
-                    log("❌ 指令被拒绝: ${bootResult.payload}")
+                    log("[error] 指令被拒绝: ${bootResult.payload}")
                 }
             }
         } catch (e: Exception) {
-            withContext(Dispatchers.Main) { log("❌ 异常: ${e.message}") }
+            withContext(Dispatchers.Main) {
+                log("[error] 异常: ${e.message}")
+            }
         }
     }
 
