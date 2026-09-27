@@ -525,13 +525,6 @@ class MainActivity : ComponentActivity() {
         ensureFlashDirExists()
         tryToStartService()
 
-        // 监听来自 ViewModel/Service 的统一日志输出到界面
-        lifecycleScope.launch {
-            viewModel.logFlow.collect { msg ->
-                appendLog(msg)
-            }
-        }
-
         // USB 权限回调广播（单独注册为 NOT_EXPORTED）
         ContextCompat.registerReceiver(
             this,
