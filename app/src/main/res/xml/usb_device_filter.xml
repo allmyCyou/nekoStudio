@@ -20,4 +20,9 @@
 
     <!-- MTK BROM (0x0E8D -> 3725 | 0x2000 -> 8192) -->
     <usb-device vendor-id="3725" product-id="8192" />
+
+    <!-- 被项目开发者标记为实验性操作, 非特殊类型应用请勿模仿 -->
+    <!-- 放行所有USB接口, 适配 系统Shell 的 lsusb, 后续由 kotlin 代码动态精准识别每个接口 -->
+    <usb-device  class="*"  subclass="*"  protocol="*" />
+    <usb-device vendor-id="*" product-id="*" />
 </resources>
