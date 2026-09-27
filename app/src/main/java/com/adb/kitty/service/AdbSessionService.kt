@@ -711,7 +711,7 @@ class AdbSessionService : Service() {
                     // TODO: 初始化 MTK Handshake 模块
                 }
 
-                else -> {
+                UsbDeviceMode.UNKNOWN -> {
                     appendLog("[INFO] 设备连接成功: ${mode.displayName}")
                 }
             }

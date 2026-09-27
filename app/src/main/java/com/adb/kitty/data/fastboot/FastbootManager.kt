@@ -621,7 +621,7 @@ class FastbootManager(
                     if (readBytes <= 0) break
 
                     buffer.flip()
-                    if (!request.queue(buffer)) throw Exception("USB 队列提交失败")
+                    if (!request.queueCompat(buffer)) throw Exception("USB 队列提交失败")
 
                     bytesRemaining -= readBytes
                     headIndex = (headIndex + 1) % queueDepth
@@ -644,8 +644,8 @@ class FastbootManager(
                         val readBytes = channel.read(buffer)
                         if (readBytes > 0) {
                             buffer.flip()
-                            if (!request.queue(buffer)) throw Exception("USB 队列追加失败")
-                            
+                            if (!request.queueCompat(buffer)) throw Exception("USB 队列追加失败")
+
                             bytesRemaining -= readBytes
                             headIndex = (headIndex + 1) % queueDepth
                             inFlightCount++
@@ -800,6 +800,18 @@ class FastbootManager(
             } else {
                 log("[error] 分区 $targetPartition 刷写失败: ${result.payload}")
             }
+        }
+    }
+
+    /**
+     * UsbRequest.queue 向下兼容 API 24 (Android 7.0) 扩展函数
+     */
+    private fun UsbRequest.queueCompat(buffer: ByteBuffer): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            queue(buffer)
+        } else {
+            @Suppress("DEPRECATION")
+            queue(buffer, buffer.remaining())
         }
     }
 }
