@@ -198,6 +198,16 @@ class FastbootManager(
         }
 
         sendFastbootCommandDirect(protocolCmd)
+
+        val result = waitForTerminalResponse(10000) { }
+
+        withContext(Dispatchers.Main) {
+            when (result.status) {
+                "OKAY" -> log("FB << OKAY: ${result.payload}")
+                "FAIL" -> log("[error] 指令被拒绝: ${result.payload}")
+                "TIMEOUT" -> log("[Warn] 无响应: ${result.payload}")
+            }
+        }
     }
 
     suspend fun performFlash(partition: String, inputPath: String) = withContext(Dispatchers.IO) {
@@ -227,10 +237,14 @@ class FastbootManager(
         }
         
         val isSparse = isSparseImage(file)
-        withContext(Dispatchers.Main) { log("[INFO] 镜像格式识别: ${if (isSparse) "Sparse Image" else "Raw Image"}") }
+        withContext(Dispatchers.Main) {
+            log("[INFO] 镜像格式识别: ${if (isSparse) "Sparse Image" else "Raw Image"}")
+        }
 
         val sizeHex = String.format("%08x", file.length())
-        withContext(Dispatchers.Main) { log("[INFO] 发送下载请求: $partition (大小: ${file.length()} bytes)") }
+        withContext(Dispatchers.Main) {
+            log("[INFO] 发送下载请求: $partition (大小: ${file.length()} bytes)")
+        }
     
         sendFastbootCommandDirect("download:$sizeHex")
     
