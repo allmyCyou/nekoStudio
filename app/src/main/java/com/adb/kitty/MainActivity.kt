@@ -102,6 +102,7 @@ import com.adb.kitty.ui.it.help.*
 import com.adb.kitty.ui.it.cpu.*
 import com.adb.kitty.data.*
 import com.adb.kitty.data.help.*
+import com.adb.kitty.data.fastboot.*
 import com.adb.kitty.service.*
 import com.adb.kitty.R
 
@@ -121,6 +122,7 @@ class MainActivity : ComponentActivity() {
     private var epIn: UsbEndpoint? = null
     private var epOut: UsbEndpoint? = null
     private var readerJob: Job? = null
+    private var logCollectJob: Job? = null
 
     private var isUsbAttached = false
     private var isAdbAuthorized = false
@@ -289,6 +291,14 @@ class MainActivity : ComponentActivity() {
             cmdsService.onCommandReceivedListener = { cmd ->
                 cmdsServiceExec(cmd)
             }
+
+            logCollectJob = lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    adbService?.logFlow?.collect { msg ->
+                        appendLog(msg)
+                    }
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -296,6 +306,7 @@ class MainActivity : ComponentActivity() {
             isServiceBound = false
             isBindingRequested = false
             adbService = null
+            logCollectJob?.cancel()
         }
     }
     
@@ -514,6 +525,13 @@ class MainActivity : ComponentActivity() {
         ensureFlashDirExists()
         tryToStartService()
 
+        // 监听来自 ViewModel/Service 的统一日志输出到界面
+        lifecycleScope.launch {
+            viewModel.logFlow.collect { msg ->
+                appendLog(msg)
+            }
+        }
+
         // USB 权限回调广播（单独注册为 NOT_EXPORTED）
         ContextCompat.registerReceiver(
             this,
@@ -554,7 +572,7 @@ class MainActivity : ComponentActivity() {
                     }
                     if (device != null) {
                         appendLog("[INFO] USB 调试设备权限获取成功")
-                        connectToInterface(device)
+                        adbService?.connectToInterface(device, flashFolder)
                     }
                 } else {
                     appendLog("[Warn] 用户拒绝了 USB 权限申请")
@@ -576,8 +594,7 @@ class MainActivity : ComponentActivity() {
                     isUsbAttached = false
                     isAdbAuthorized = false
                     isFastbootMode = false
-                    readerJob?.cancel()
-                    usbConn?.close()
+                    adbService?.closeUsbConnection()
                     appendLog("[Warn] USB 主机设备已断开")
                 }
 
@@ -1020,19 +1037,14 @@ class MainActivity : ComponentActivity() {
 
                 cmd.startsWith("fastboot") -> {
                     appendLog("[INFO] FB >> $cmd")
-
-                    runCatching { viewModel.runCommand(cmd) }
-                        .onFailure { appendLog("[error] ${it.message}") }
-
+                    sendFastbootCommand(cmd)
                     return@launch
                 }
 
                 else -> {
                     if (isFastbootMode) {
                         appendLog("[INFO] FB >> $cmd")
-
-                        runCatching { viewModel.runCommand(cmd) }
-                            .onFailure { appendLog("[error] ${it.message}") }
+                        sendFastbootCommand(cmd)
                     } else {
                         handleLocalShellPipeline(cmd)
                     }
@@ -1150,13 +1162,13 @@ class MainActivity : ComponentActivity() {
                   appendLog("[INFO] FB >> $cmd") 
                }
                // 2. 发送原始指令 (调用临时执行方法)
-               viewModel.runCommand(cmd)
+               sendFastbootCommand(cmd)
                // 3. 等待设备响应（如果有）
                 delay(500) 
             }
         }
     }
-    
+
     fun findHostDevice() {
         val devices = usbManager.deviceList
         if (devices.isEmpty()) {
@@ -1165,128 +1177,59 @@ class MainActivity : ComponentActivity() {
         }
 
         for (device in devices.values) {
+            appendLog("设备: ${device.productName ?: "unknown"}")
+            appendLog("制造商: ${device.manufacturerName ?: "unknown"}")
+            appendLog("版本号: ${device.version}")
+            appendLog("VID: ${device.vendorId} | PID: ${device.productId}")
+
             for (i in 0 until device.interfaceCount) {
                 val intf = device.getInterface(i)
-                appendLog("设备: ${device.productName ?: "unknown"}")
-                appendLog("制造商: ${device.manufacturerName ?: "unknown"}")
-                appendLog("版本号: ${device.version}")
-                // 在遍历 interface 的循环内
                 appendLog("接口名称: ${intf.name ?: "unknown"}")
-                // USB设备信息
-                appendLog("VID: ${device.vendorId} | PID: ${device.productId}")
                 appendLog("检查接口 $i: Class=${intf.interfaceClass}, Subclass=${intf.interfaceSubclass}, Protocol=${intf.interfaceProtocol}")
-                
-                // 遍历端点 (Endpoint)
+
                 for (j in 0 until intf.endpointCount) {
                     val ep = intf.getEndpoint(j)
-                    
-                    // 解析端点方向：最高位为 1 代表 IN (设备到手机)，0 代表 OUT (手机到设备)
                     val isInput = (ep.address and 0x80) != 0
                     val direction = if (isInput) "IN (设备->手机)" else "OUT (手机->设备)"
-                    
-                    // 解析端点编号：低 4 位代表编号
                     val epNumber = ep.address and 0x0F
-                    
-                    appendLog("端点 $j: 地址=${ep.address} (方向: $direction, 编号: $epNumber), 最大包大小=${ep.maxPacketSize}")
+                    appendLog("  端点 $j: 地址=${ep.address} (方向: $direction, 编号: $epNumber), 最大包大小=${ep.maxPacketSize}")
                 }
-                
-                appendLog("--- 通过USB连接输出 ---")
-                if (intf.interfaceClass == 255 && intf.interfaceSubclass == 66) {
-                    isFastbootMode = (intf.interfaceProtocol == 3)
-                    isUsbAttached = true
-                    
-                    val modeName = if (isFastbootMode) "Fastboot" else "ADB"
-                    // 匹配要求：同行显示 VID/PID 十进制
-                    appendLog("--- 检测到 $modeName 兼容设备 ---")
+            }
 
-                    if (!usbManager.hasPermission(device)) {
-                        // --- 修复 Android 14 崩溃的关键点 ---
-                        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                           PendingIntent.FLAG_MUTABLE 
-                        } else {
-                            0
-                        }
-                        // 必须明确 setPackage，将隐式 Intent 变为显式 Intent
-                        val intent = Intent(ACTION_USB_PERMISSION).apply {
-                            setPackage(packageName) 
-                        }
-                        val pi = PendingIntent.getBroadcast(this, 0, intent, flags)
-                        usbManager.requestPermission(device, pi)
-                        
+            val (mode, targetIntf) = UsbDeviceMode.matchDevice(device)
+            appendLog("--- 通过USB连接输出 ---")
+
+            if (mode != UsbDeviceMode.UNKNOWN && targetIntf != null) {
+                isUsbAttached = true
+                isFastbootMode = (mode == UsbDeviceMode.FASTBOOT || mode == UsbDeviceMode.FASTBOOTD_CUSTOM)
+
+                appendLog("--- 检测到兼容设备: ${mode.displayName} ---")
+
+                if (!usbManager.hasPermission(device)) {
+                    val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        PendingIntent.FLAG_MUTABLE
                     } else {
-                        appendLog("[INFO] 硬件序列号: ${device.serialNumber ?: "unknown"}")
-                        connectToInterface(device)
+                        0
                     }
-                    return
+                    val intent = Intent(ACTION_USB_PERMISSION).apply {
+                        setPackage(packageName)
+                    }
+                    val pi = PendingIntent.getBroadcast(this, 0, intent, flags)
+                    usbManager.requestPermission(device, pi)
+                } else {
+                    appendLog("[INFO] 硬件序列号: ${device.serialNumber ?: "unknown"}")
+                    // 直接将 UsbDevice 派发给 Service 处理
+                    adbService?.connectToInterface(device, flashFolder)
                 }
+                return
             }
         }
-        appendLog("发现设备但无 ADB/Fastboot 接口")
+        appendLog("发现设备但无 ADB/Fastboot/9008/MTK 接口")
     }
 
-    private fun connectToInterface(device: UsbDevice) {
-        val protocolTarget = if (isFastbootMode) 3 else 1
-        val intf = (0 until device.interfaceCount).map { device.getInterface(it) }
-            .firstOrNull { it.interfaceClass == 255 && it.interfaceSubclass == 66 && it.interfaceProtocol == protocolTarget } ?: return
-
-        val conn = usbManager.openDevice(device) ?: return
-        conn.claimInterface(intf, true)
-
-        var epIn: UsbEndpoint? = null
-        var epOut: UsbEndpoint? = null
-        for (j in 0 until intf.endpointCount) {
-            val ep = intf.getEndpoint(j)
-            if (ep.direction == UsbConstants.USB_DIR_IN) epIn = ep else epOut = ep
-        }
- 
-        if (epIn == null || epOut == null) {
-            conn.releaseInterface(intf)
-            conn.close()
-            return
-        }
-
-        epIn = epIn
-        epOut = epOut
-        usbConn = conn
-    
-        val serialNumber = runCatching { device.serialNumber }.getOrNull() ?: "unknown"
-        val deviceKey = "USB_$serialNumber"
-
-        if (isFastbootMode) {
-            setupFastboot()
-            appendLog("[INFO] Fastboot 物理信道就绪 | 序列号: $serialNumber")
-        } else {
-            isAdbAuthorized = true
-            lifecycleScope.launch(Dispatchers.IO) {
-                try {
-                    withContext(Dispatchers.Main) {
-                        appendLog("adbd 支持已被移除")
-                    }
-                } catch (e: Exception) {
-                    withContext(Dispatchers.Main) {
-                        appendLog("[Error]: ${e.message}")
-                    }
-                }
-            }
-        }
-    }
-    
-    private fun setupFastboot() {
-        viewModel.initFastboot(
-            usbConn = usbConn!!, 
-            epOut = epOut!!, 
-            epIn = epIn!!,
-            responseChannel = responseChannel,
-            flashFolder = flashFolder
-        )
-
-        lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.fastbootManager?.logFlow?.collect { msg ->
-                    appendLog(msg) 
-                }
-            }
-        }
+    fun sendFastbootCommand(commandText: String) {
+        adbService?.runFastbootCommand(commandText)
+            ?: appendLog("[error] 服务未绑定，无法发送指令")
     }
 
     private fun exportLogToFlashFolder() {

@@ -4,6 +4,7 @@ import com.adb.kitty.ui.theme.*
 import com.adb.kitty.ui.viewmodel.*
 import com.adb.kitty.ui.it.*
 import com.adb.kitty.data.*
+import com.adb.kitty.data.fastboot.*
 import com.adb.kitty.R
 import com.adb.kitty.*
 
@@ -66,6 +67,7 @@ import androidx.annotation.CallSuper
 
 import kotlin.concurrent.thread
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import java.util.Locale
@@ -91,6 +93,26 @@ class AdbSessionService : Service() {
         const val ACTION_START_RECORDING = "com.adb.kitty.ACTION_START_RECORDING"
         const val ACTION_STOP_RECORDING = "com.adb.kitty.ACTION_STOP_RECORDING"
         private const val KEY_REPLY_INPUT = "com.adb.kitty.service_key_reply_input"
+    }
+
+    private var usbConn: UsbDeviceConnection? = null
+    var fastbootManager: FastbootManager? = null
+        private set
+
+    // 重建/重新绑定 Service 时，自动向 Activity 重放最近 200 条日志
+    private val _logFlow = MutableSharedFlow<String>(
+        replay = 200,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val logFlow = _logFlow.asSharedFlow()
+
+    private val responseChannel = Channel<String>(Channel.UNLIMITED)
+
+    fun appendLog(msg: String) {
+        serviceScope.launch {
+            _logFlow.emit(msg)
+        }
     }
 
     private var lastCommand: String? = null
@@ -599,6 +621,127 @@ class AdbSessionService : Service() {
         return finalIcon
     }
 
+    /**
+     * 根据设备识别模式构建对应的物理通信管道
+     */
+    fun connectToInterface(device: UsbDevice, flashFolder: File) {
+        serviceScope.launch(Dispatchers.IO) {
+            val usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+            val (mode, intf) = UsbDeviceMode.matchDevice(device)
+
+            if (mode == UsbDeviceMode.UNKNOWN || intf == null) {
+                appendLog("[Warn] 无法识别该设备的硬件通信协议或无可用接口")
+                return@launch
+            }
+
+            appendLog("[INFO] 正在建立物理管道，模式: ${mode.displayName}")
+
+            val conn = usbManager.openDevice(device)
+            if (conn == null) {
+                appendLog("[error] 打开 USB 设备失败，请检查 USB 权限")
+                return@launch
+            }
+
+            if (!conn.claimInterface(intf, true)) {
+                conn.close()
+                appendLog("[error] 占用 USB 接口 (claimInterface) 失败")
+                return@launch
+            }
+
+            var epIn: UsbEndpoint? = null
+            var epOut: UsbEndpoint? = null
+            for (j in 0 until intf.endpointCount) {
+                val ep = intf.getEndpoint(j)
+                if (ep.direction == UsbConstants.USB_DIR_IN) {
+                    epIn = ep
+                } else {
+                    epOut = ep
+                }
+            }
+
+            if (epIn == null || epOut == null) {
+                conn.releaseInterface(intf)
+                conn.close()
+                appendLog("[error] 端点配置异常: 未能同时获得 IN 和 OUT 端点")
+                return@launch
+            }
+
+            this@UsbFastbootService.usbConn = conn
+            val serialNumber = runCatching { device.serialNumber }.getOrNull() ?: "unknown"
+
+            when (mode) {
+                UsbDeviceMode.FASTBOOT, UsbDeviceMode.FASTBOOTD_CUSTOM -> {
+                    fastbootManager = FastbootManager(
+                        scope = serviceScope,
+                        usbConn = conn,
+                        epOut = epOut,
+                        epIn = epIn,
+                        responseChannel = responseChannel,
+                        flashFolder = flashFolder,
+                        context = this@UsbFastbootService,
+                        usbManager = usbManager,
+                        usbDevice = device
+                    ).apply {
+                        startFastbootReader()
+                    }
+
+                    serviceScope.launch {
+                        fastbootManager?.logFlow?.collect { msg -> appendLog(msg) }
+                    }
+
+                    appendLog("[INFO] ${mode.displayName} 物理信道已就绪 | 序列号: $serialNumber")
+                }
+
+                UsbDeviceMode.ADB -> {
+                    appendLog("[INFO] ADB 设备已建立物理管道，暂不支持")
+                }
+
+                UsbDeviceMode.QUALCOMM_9008 -> {
+                    appendLog("[INFO] 高通 EDL 9008 模式已激活，准备握手 Sahara / Firehose 协议，暂不支持")
+                    // TODO: 初始化 9008 协议管理器 (例如 setupQcom9008Manager(conn, epOut, epIn))
+                }
+
+                UsbDeviceMode.QUALCOMM_900E -> {
+                    appendLog("[Warn] 高通 900E 诊断模式已连接 (通常需要加载 Diagnostics 驱动或切换模式)")
+                    // TODO: 处理 900E 恢复或诊断通道
+                }
+
+                UsbDeviceMode.MTK_PRELOADER, UsbDeviceMode.MTK_BROM -> {
+                    appendLog("[INFO] MTK 联发科硬件已就绪，准备握手 BROM / Preloader 串行命令，暂不支持")
+                    // TODO: 初始化 MTK Handshake 模块
+                }
+
+                else -> {
+                    appendLog("[INFO] 设备连接成功: ${mode.displayName}")
+                }
+            }
+        }
+    }
+
+    fun runFastbootCommand(cmd: String) {
+        serviceScope.launch(Dispatchers.IO) {
+            val manager = fastbootManager
+            if (manager == null) {
+                appendLog("[error] Fastboot 驱动未就绪，请检查硬件通信。")
+                return@launch
+            }
+            try {
+                manager.executeCommandSync(cmd)
+            } catch (e: Exception) {
+                appendLog("[error] 物理管道执行崩溃: ${e.message}")
+            }
+        }
+    }
+
+    fun closeUsbConnection() {
+        serviceScope.launch(Dispatchers.IO) {
+            fastbootManager = null
+            usbConn?.close()
+            usbConn = null
+            appendLog("[Warn] USB 硬件管道已安全关闭")
+        }
+    }
+
     fun executeDownloadFromService(urlStr: String, flashFolder: File, onLog: (String) -> Unit) {
         val uri = urlStr.toUri()
         val scheme = uri.scheme?.lowercase()
@@ -1025,6 +1168,7 @@ class AdbSessionService : Service() {
         releaseWakeLock()
         terminateCurrentCommand()
         runCatching { unregisterReceiver(shellCmdReceiver) }
+        closeUsbConnection()
         super.onDestroy()
     }
 }

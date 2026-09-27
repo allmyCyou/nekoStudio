@@ -77,6 +77,7 @@ import androidx.compose.ui.text.font.*
 
 import com.adb.kitty.ui.theme.*
 import com.adb.kitty.data.*
+import com.adb.kitty.data.fastboot.*
 import com.adb.kitty.*
 import com.adb.kitty.service.*
 import com.adb.kitty.ui.it.*
@@ -223,47 +224,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         return cachedTimeString
     }
 
-    private var _fastbootManager: FastbootManager? = null
-    val fastbootManager: FastbootManager? get() = _fastbootManager
-
-    fun initFastboot(
-        usbConn: UsbDeviceConnection,
-        epOut: UsbEndpoint,
-        epIn: UsbEndpoint,
-        responseChannel: Channel<String>,
-        flashFolder: File
-    ) {
-        if (_fastbootManager == null) {
-            _fastbootManager = FastbootManager(
-                scope = viewModelScope,
-                usbConn = usbConn,
-                epOut = epOut,
-                epIn = epIn,
-                responseChannel = responseChannel,
-                flashFolder = flashFolder
-            )
-            _fastbootManager?.startFastbootReader()
-            appendLog("[INFO] 宿主 ViewModel 成功并网 Fastboot 物理总线。")
-        }
-    }
-
-    fun runCommand(cmd: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val manager = _fastbootManager
-            if (manager == null) {
-                appendLog("[error] Fastboot 驱动未就绪，请检查硬件通信。")
-                return@launch
-            }
-            try {
-                manager.executeCommandSync(cmd)
-            } catch (e: Exception) {
-                appendLog("[error] 物理管道执行崩溃: ${e.message}")
-            }
-        }
-    }
-
     override fun onCleared() {
-        _fastbootManager = null
+        
     }
 
     val items: List<CommandUiItem> by lazy { buildCombinedItems() }
