@@ -132,7 +132,7 @@ class FastbootManager(
                 onInfoReceived(resp)
             }
         }
-        return FastbootResponse("TIMEOUT", "无响应", lines)
+        return FastbootResponse("TIMEOUT", "[Warn] 无响应", lines)
     }
 
     private fun sendFastbootCommandDirect(command: String) {
@@ -203,7 +203,6 @@ class FastbootManager(
 
         withContext(Dispatchers.Main) {
             when (result.status) {
-                "OKAY" -> log("FB << OKAY: ${result.payload}")
                 "FAIL" -> log("[error] 指令被拒绝: ${result.payload}")
                 "TIMEOUT" -> log("[Warn] 无响应: ${result.payload}")
             }
