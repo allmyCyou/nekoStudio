@@ -99,10 +99,9 @@ class AdbSessionService : Service() {
     var fastbootManager: FastbootManager? = null
         private set
 
-    // 重建/重新绑定 Service 时，自动向 Activity 重放最近 200 条日志
     private val _logFlow = MutableSharedFlow<String>(
-        replay = 200,
-        extraBufferCapacity = 64,
+        replay = 0,
+        extraBufferCapacity = 128,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     val logFlow = _logFlow.asSharedFlow()
