@@ -6,8 +6,17 @@
 - Android 17 - Android 7.0
 - Android TV
 
-## Shell solution
-- For the Shell executor, we may need to migrate to the foreground service to fully use all the instructions that come with Android 14+. The background process daemon service solution may no longer be a recommended solution for Android 14+ systems.
+## Mode
+- ROOT
+- Shell
+- adb
+- fastboot
+- fastbootd
+- adb sideload
+- 900e
+- 9008
+- MTK Preloader
+- MTK BROM
 
 ## Shell
 - How to use shell script to call internal instructions of the application
