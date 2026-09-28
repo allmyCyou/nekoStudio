@@ -702,7 +702,31 @@ class AdbSessionService : Service() {
 
                 UsbDeviceMode.QUALCOMM_900E -> {
                     appendLog("[Warn] 高通 900E 诊断模式已连接 (通常需要加载 Diagnostics 驱动或切换模式)")
-                    // TODO: 处理 900E 恢复或诊断通道
+
+                    if (device.configurationCount > 0) {
+                        val config = device.getConfiguration(0)
+                        val maxPower = config.maxPower
+                        val isSelfPowered = config.isSelfPowered
+
+                        appendLog("📊 [硬件诊断] 电源配置属性: 最大供电需求 = ${maxPower}mA | 电池自供电状态 = $isSelfPowered")
+  
+                        // Output localized analysis based on electrical traits
+                        when {
+                            maxPower == 0 && isSelfPowered -> {
+                                appendLog("💡 [分析] 设备目前处于自供电状态，依赖内部电池运行。")
+                            }
+                            maxPower in 1..499 -> {
+                                appendLog("💡 [分析] 供电限制偏低 (${maxPower}mA)，芯片引导可能停滞在极早期硬件自检阶段。")
+                            }
+                            maxPower >= 500 -> {
+                                appendLog("💡 [分析] 设备已申请标准 USB 大电流通道。")
+                            }
+                        }
+                    } else {
+                        appendLog("🚨 [错误] 无法读取该设备的 USB 配置树描述符。")
+                    }
+
+                    appendLog("👉 [恢复建议] 900E 无法直接进行刷机写入。请指导用户长按 [电源键 + 音量减] 强制重启，或配合 EDL 线 / 短接点强切至 9008 救砖。")
                 }
 
                 UsbDeviceMode.MTK_PRELOADER, UsbDeviceMode.MTK_BROM -> {
