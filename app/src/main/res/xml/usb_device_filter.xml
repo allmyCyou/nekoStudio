@@ -15,10 +15,10 @@
     <!-- Qualcomm 900E (0x05C6 -> 1478 | 0x900E -> 36878) -->
     <usb-device vendor-id="1478" product-id="36878" />
 
-    <!-- MTK Preloader (0x0E8D -> 3725 | 0x0003 -> 3) -->
+    <!-- MTK BROM (0x0E8D -> 3725 | 0x0003 -> 3) -->
     <usb-device vendor-id="3725" product-id="3" />
 
-    <!-- MTK BROM (0x0E8D -> 3725 | 0x2000 -> 8192) -->
+    <!-- MTK Preloader (0x0E8D -> 3725 | 0x2000 -> 8192) -->
     <usb-device vendor-id="3725" product-id="8192" />
 
     <!-- 被项目开发者标记为实验性操作, 非特殊类型应用请勿模仿 -->

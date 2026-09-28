@@ -9,8 +9,8 @@ enum class UsbDeviceMode(val displayName: String) {
     FASTBOOTD_CUSTOM("特定新设备 Fastbootd 扩展接口 (255/66/2)"),
     QUALCOMM_9008("高通 9008 EDL 深度刷机模式 (VID:1478 PID:36872)"),
     QUALCOMM_900E("高通 900E 诊断模式 (VID:1478 PID:36878)"),
-    MTK_PRELOADER("联发科 MTK Preloader 模式 (VID:3725 PID:3)"),
-    MTK_BROM("联发科 MTK BROM 深度刷机模式 (VID:3725 PID:8192)"),
+    MTK_PRELOADER("联发科 MTK Preloader 模式 (VID:3725 PID:8192)"),
+    MTK_BROM("联发科 MTK BROM 深度刷机模式 (VID:3725 PID:3)"),
     UNKNOWN("未知设备/未匹配到有效通信接口");
 
     companion object {
@@ -22,8 +22,8 @@ enum class UsbDeviceMode(val displayName: String) {
             when {
                 vid == 1478 && pid == 36872 -> return QUALCOMM_9008 to findPrimaryBulkInterface(device)
                 vid == 1478 && pid == 36878 -> return QUALCOMM_900E to findPrimaryBulkInterface(device)
-                vid == 3725 && pid == 3 -> return MTK_PRELOADER to findPrimaryBulkInterface(device)
-                vid == 3725 && pid == 8192 -> return MTK_BROM to findPrimaryBulkInterface(device)
+                vid == 3725 && pid == 8192  -> return MTK_PRELOADER to findPrimaryBulkInterface(device)
+                vid == 3725 && pid == 3     -> return MTK_BROM to findPrimaryBulkInterface(device)
             }
 
             // 2. 校验 Android 规范接口 Class=255, Subclass=66
