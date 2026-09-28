@@ -1183,7 +1183,7 @@ class MainActivity : ComponentActivity() {
                 appendLine("拥有配置(Configuration)数量: $configCount")
 
                 for (c in 0 until configCount) {
-                    val config = device.getConfiguration(c) ?: continue
+                    val config = device.getConfiguration(c)
                     // config.name
                     appendLine("[配置 $c] ID: ${config.id}, 名称: ${config.name ?: "unknown"}")
                     appendLine("属性: MaxPower=${config.maxPower}mA, RemoteWakeup=${config.isRemoteWakeup}, SelfPowered=${config.isSelfPowered}")
@@ -1191,7 +1191,7 @@ class MainActivity : ComponentActivity() {
                     // 接口层 (Interface)
                     val interfaceCount = config.interfaceCount
                     for (i in 0 until interfaceCount) {
-                        val intf = config.getInterface(i) ?: continue
+                        val intf = config.getInterface(i)
                         appendLine("[接口 $i] ID: ${intf.id}, 名称: ${intf.name ?: "unknown"}")
                         // intf.alternateSetting (替代设置)
                         appendLine("属性: AlternateSetting=${intf.alternateSetting}, Class=${intf.interfaceClass}, Subclass=${intf.interfaceSubclass}, Protocol=${intf.interfaceProtocol}")
@@ -1201,7 +1201,7 @@ class MainActivity : ComponentActivity() {
                             val ep = intf.getEndpoint(j) ?: continue
                             val isInput = (ep.address and 0x80) != 0
                             val direction = if (isInput) "IN (设备->手机)" else "OUT (手机->设备)"
-                            val epNumber = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) ep.endpointNumber else (ep.address and 0x7F)
+                            val epNumber = ep.address and 0x7F
 
                             // 端点传输类型识别
                             val transferType = when (ep.type) {
@@ -1231,11 +1231,14 @@ class MainActivity : ComponentActivity() {
                 appendLog("--- 检测到兼容设备: ${mode.displayName} ---")
 
                 if (!usbManager.hasPermission(device)) {
-                    // 修复点 2：针对 Android 12 及以上系统更严谨地处理 PendingIntent 标志
-                    val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
-                    } else {
-                        0
+                    val flags = when {
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> { // Android 14+
+                            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
+                        }
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> { // Android 12 & 13
+                            PendingIntent.FLAG_MUTABLE
+                        }
+                        else -> 0 // Android 7.0 to 11
                     }
 
                     val intent = Intent(ACTION_USB_PERMISSION).apply {
