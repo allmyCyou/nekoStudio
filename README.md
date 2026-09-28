@@ -7,16 +7,16 @@
 - Android TV
 
 ## Mode
-- ROOT
-- Shell
-- adb
-- fastboot
-- fastbootd
-- adb sideload
-- 900e
-- 9008
-- MTK Preloader
-- MTK BROM
+- [x] ROOT
+- [x] Shell
+- [ ] adb
+- [x] fastboot
+- [x] fastbootd
+- [ ] adb sideload
+- [x] 900e
+- [ ] 9008
+- [ ] MTK Preloader
+- [ ] MTK BROM
 
 ## Shell
 - How to use shell script to call internal instructions of the application
