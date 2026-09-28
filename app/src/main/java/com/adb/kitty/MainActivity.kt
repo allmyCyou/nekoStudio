@@ -1170,24 +1170,56 @@ class MainActivity : ComponentActivity() {
         }
 
         for (device in devices.values) {
-            appendLog("设备: ${device.productName ?: "unknown"}")
-            appendLog("制造商: ${device.manufacturerName ?: "unknown"}")
-            appendLog("版本号: ${device.version}")
-            appendLog("VID: ${device.vendorId} | PID: ${device.productId}")
+            // 使用 StringBuilder 减少频繁字符串拼接和日志输出次数
+            val logBuilder = StringBuilder().apply {
+                // 设备基本信息
+                appendLine("物理设备: ${device.productName ?: "unknown"}")
+                appendLine("制造商: ${device.manufacturerName ?: "unknown"}")
+                appendLine("VID: ${device.vendorId} | PID: ${device.productId} | 版本: ${device.version}")
+                appendLine("全局类: Class=${device.deviceClass}, Subclass=${device.deviceSubclass}, Protocol=${device.deviceProtocol}")
 
-            for (i in 0 until device.interfaceCount) {
-                val intf = device.getInterface(i)
-                appendLog("接口名称: ${intf.name ?: "unknown"}")
-                appendLog("检查接口 $i: Class=${intf.interfaceClass}, Subclass=${intf.interfaceSubclass}, Protocol=${intf.interfaceProtocol}")
+                // 配置层 (Configuration)
+                val configCount = device.configurationCount
+                appendLine("拥有配置(Configuration)数量: $configCount")
 
-                for (j in 0 until intf.endpointCount) {
-                    val ep = intf.getEndpoint(j)
-                    val isInput = (ep.address and 0x80) != 0
-                    val direction = if (isInput) "IN (设备->手机)" else "OUT (手机->设备)"
-                    val epNumber = ep.address and 0x0F
-                    appendLog("  端点 $j: 地址=${ep.address} (方向: $direction, 编号: $epNumber), 最大包大小=${ep.maxPacketSize}")
+                for (c in 0 until configCount) {
+                    val config = device.getConfiguration(c) ?: continue
+                    // config.name
+                    appendLine("[配置 $c] ID: ${config.id}, 名称: ${config.name ?: "unknown"}")
+                    appendLine("属性: MaxPower=${config.maxPower}mA, RemoteWakeup=${config.isRemoteWakeup}, SelfPowered=${config.isSelfPowered}")
+
+                    // 接口层 (Interface)
+                    val interfaceCount = config.interfaceCount
+                    for (i in 0 until interfaceCount) {
+                        val intf = config.getInterface(i) ?: continue
+                        appendLine("[接口 $i] ID: ${intf.id}, 名称: ${intf.name ?: "unknown"}")
+                        // intf.alternateSetting (替代设置)
+                        appendLine("属性: AlternateSetting=${intf.alternateSetting}, Class=${intf.interfaceClass}, Subclass=${intf.interfaceSubclass}, Protocol=${intf.interfaceProtocol}")
+
+                        // 端点层 (Endpoint)
+                        for (j in 0 until intf.endpointCount) {
+                            val ep = intf.getEndpoint(j) ?: continue
+                            val isInput = (ep.address and 0x80) != 0
+                            val direction = if (isInput) "IN (设备->手机)" else "OUT (手机->设备)"
+                            val epNumber = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) ep.endpointNumber else (ep.address and 0x7F)
+
+                            // 端点传输类型识别
+                            val transferType = when (ep.type) {
+                                UsbConstants.USB_ENDPOINT_XFER_BULK -> "BULK (批量传输)"
+                                UsbConstants.USB_ENDPOINT_XFER_INT -> "INT (中断传输)"
+                                UsbConstants.USB_ENDPOINT_XFER_ISOC -> "ISOC (同步传输)"
+                                UsbConstants.USB_ENDPOINT_XFER_CONTROL -> "CONTROL (控制)"
+                                else -> "UNKNOWN (${ep.type})"
+                            }
+
+                            // ep.interval (传输间隔)
+                            appendLine("[- 端点 $j] 物理地址=${ep.address} (方向: $direction, 编号: $epNumber)")
+                            appendLine("传输属性: 类型: $transferType, MaxPacketSize=${ep.maxPacketSize}, 轮询间隔(Interval)=${ep.interval}")
+                        }
+                    }
                 }
             }
+            appendLog(logBuilder.toString())
 
             val (mode, targetIntf) = UsbDeviceMode.matchDevice(device)
             appendLog("--- 通过USB连接输出 ---")
@@ -1199,19 +1231,25 @@ class MainActivity : ComponentActivity() {
                 appendLog("--- 检测到兼容设备: ${mode.displayName} ---")
 
                 if (!usbManager.hasPermission(device)) {
+                    // 修复点 2：针对 Android 12 及以上系统更严谨地处理 PendingIntent 标志
                     val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        PendingIntent.FLAG_MUTABLE
+                        PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
                     } else {
                         0
                     }
+
                     val intent = Intent(ACTION_USB_PERMISSION).apply {
-                        setPackage(packageName)
+                        setPackage(packageName) // 限制接收者包名以提高安全性
                     }
+
                     val pi = PendingIntent.getBroadcast(this, 0, intent, flags)
                     usbManager.requestPermission(device, pi)
                 } else {
-                    appendLog("[INFO] 硬件序列号: ${device.serialNumber ?: "unknown"}")
-                    // 直接将 UsbDevice 派发给 Service 处理
+                    // 注意：在没有权限时直接获取 serialNumber 可能会返回 null 或抛出 SecurityException
+                    val serial = try { device.serialNumber } catch (e: SecurityException) { "Permission Denied" }
+                    appendLog("[INFO] 硬件序列号: ${serial ?: "unknown"}")
+                    
+                    // 派发给 Service 处理
                     adbService?.connectToInterface(device, flashFolder)
                 }
                 return
