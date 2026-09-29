@@ -148,18 +148,6 @@ class AdbSessionService : Service() {
         triggerTickerRefreshImmediate()
     }
 
-    // 实验性 API，虽然已通过测试，但它依然是一个稳定性未知的 API
-    private val shellCmdReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "com.adb.kitty.MY_CMD") {
-                // 获取广播发来的指令（兼容 extra 键名为 cmd 或 args）
-                val cmd = intent.getStringExtra("cmd") ?: intent.getStringExtra("args") ?: return
-
-                onCommandReceivedListener?.invoke(cmd)
-            }
-        }
-    }
-
     private var currentText: String = "00:00:00"
     private var activeForegroundTypes: Int = 0
     private var serviceStartTime = 0L
@@ -176,13 +164,6 @@ class AdbSessionService : Service() {
         // 运行前台服务被要求在 1秒或者2秒 内发送通知，必需发送通知，哪怕用户没有授予通知权限，也是可以正常运行的，通知并不会影响到前台服务，唯一受影响的只有视觉上
         updateShortcutIfNeeded()
         startNotificationTicker()
-
-        ContextCompat.registerReceiver(
-            this,
-            shellCmdReceiver,
-            IntentFilter("com.adb.kitty.MY_CMD"),
-            ContextCompat.RECEIVER_NOT_EXPORTED
-        )
     }
 
 /*
@@ -1190,7 +1171,6 @@ class AdbSessionService : Service() {
         serviceScope.cancel()
         releaseWakeLock()
         terminateCurrentCommand()
-        runCatching { unregisterReceiver(shellCmdReceiver) }
         closeUsbConnection()
         super.onDestroy()
     }
