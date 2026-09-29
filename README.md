@@ -18,23 +18,6 @@
 - [ ] MTK Preloader
 - [ ] MTK BROM
 
-## Shell
-- How to use shell script to call internal instructions of the application
-- This dynamic broadcast receiver is a non-system type, so no matter how other applications call it, there will be no reaction.
-- For example, calling the root-free fastboot command implemented inside the application
-```shell
-#!/system/bin/sh
-
-# The prerequisite for using the fastboot instruction is isFastbootMode = true
-fastboot() {
-#  am broadcast -a com.adb.kitty.MY_CMD --es "args" "$*" > /dev/null
-    am broadcast -a com.adb.kitty.MY_CMD --es "cmd" "$*" > /dev/null
-}
-
-fastboot getvar unlocked
-fastboot oem device-info
-```
-
 ## su
 - KernelSU、SukiSU、Magisk
 ```shell
@@ -67,12 +50,6 @@ $ su -c cat /sdcard/init_boot.img > /dev/block/by-name/init_boot_b
 
 ## Verify signature
 - V3.2 signature is only supported by JDK25
-```shell
-$ java --version
-openjdk 25.0.4 2026-07-21
-OpenJDK Runtime Environment (build 25.0.4)
-OpenJDK 64-Bit Server VM (build 25.0.4, mixed mode)
-```
 - Verify Release APK
 ```shell
 $ ./apksigner verify -v --verbose app-release-sign.apk
