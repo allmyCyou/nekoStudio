@@ -30,17 +30,22 @@ public class AdbSyncClientV2(
             return@withContext v1.toFileStatV2()
         }
 
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         try {
-            val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
-            stream.write(SyncCommand.createHeader(SyncCommandV2.ID_STA2, pathBytes.size) + pathBytes)
+            val requestBytes = SyncCommandV2.createRequestV2(
+                id = SyncCommandV2.ID_STA2,
+                mode = 0,
+                flags = SyncFlags.FLAG_NONE,
+                remotePath = remotePath
+            )
+            stream.write(requestBytes)
 
-            val respHeader = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+            val respHeader = reader.readExactBytes(SyncCommand.HEADER_SIZE)
             val (id, _) = SyncCommand.parseHeader(respHeader)
 
             check(id == SyncCommandV2.ID_STA2 || id == SyncCommandV2.ID_LSTA) { "Unexpected STA2 response tag: $id" }
 
-            val payload = readExactBytes(stream, 68)
+            val payload = reader.readExactBytes(68)
             ByteBuffer.wrap(payload).order(ByteOrder.LITTLE_ENDIAN).parseSyncStatV2(remotePath)
         } finally {
             stream.close()
@@ -62,26 +67,32 @@ public class AdbSyncClientV2(
             }
         }
 
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         val entries = mutableListOf<FileStatV2>()
 
         try {
-            val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
-            stream.write(SyncCommand.createHeader(SyncCommandV2.ID_LST2, pathBytes.size) + pathBytes)
+            val requestBytes = SyncCommandV2.createRequestV2(
+                id = SyncCommandV2.ID_LST2,
+                mode = 0,
+                flags = SyncFlags.FLAG_NONE,
+                remotePath = remotePath
+            )
+            stream.write(requestBytes)
 
             while (true) {
-                val headerBytes = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+                val headerBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
                 val (id, nameLen) = SyncCommand.parseHeader(headerBytes)
 
                 when (id) {
                     SyncCommandV2.ID_DNT2 -> {
-                        val statBytes = readExactBytes(stream, 68)
-                        val nameBytes = readExactBytes(stream, nameLen)
+                        val statBytes = reader.readExactBytes(68)
+                        val nameBytes = reader.readExactBytes(nameLen)
                         val fileName = String(nameBytes, Charsets.UTF_8)
 
                         if (fileName != "." && fileName != "..") {
                             val fullPath = if (remotePath.endsWith("/")) "$remotePath$fileName" else "$remotePath/$fileName"
-                            val fileStat = ByteBuffer.wrap(statBytes).order(ByteOrder.LITTLE_ENDIAN)
+                            val fileStat = ByteBuffer.wrap(statBytes)
+                                .order(ByteOrder.LITTLE_ENDIAN)
                                 .parseSyncStatV2(fullPath)
                             entries.add(fileStat)
                         }
@@ -109,18 +120,19 @@ public class AdbSyncClientV2(
         mtime: Long = System.currentTimeMillis() / 1000,
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
+        require(flags == SyncFlags.FLAG_NONE) {
+            "Compression flags ($flags) are not supported in raw stream implementation."
+        }
+
         if (!supportsSendV2) {
-            // 降级使用 V1 Push
             return@withContext push(inputStream, remotePath, totalSize, mode, mtime, onProgress)
         }
 
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         try {
-            // 1. 发送 SND2 请求 (8 字节 Sync Header + 12 字节 SyncRequestV2 + path)
             val requestBytes = SyncCommandV2.createRequestV2(SyncCommandV2.ID_SND2, mode, flags, remotePath)
             stream.write(requestBytes)
 
-            // 2. 循环发送 DATA 数据包
             val buffer = ByteArray(64 * 1024)
             var bytesWritten = 0L
             var read: Int
@@ -136,20 +148,18 @@ public class AdbSyncClientV2(
                 }
             }
 
-            // 3. 发送 DONE 报文带上修改时间
-            val doneHeader = SyncCommand.createHeader(SyncCommand.ID_DONE, mtime.toInt())
+            val doneHeader = SyncCommand.createHeader(SyncCommand.ID_DONE, sanitizeMtime(mtime))
             stream.write(doneHeader)
 
-            // 4. 读取 OKAY / FAIL 结果
-            val respHeaderBytes = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+            val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
             val (id, len) = SyncCommand.parseHeader(respHeaderBytes)
 
             if (id == SyncCommand.ID_FAIL) {
-                val errorMsg = String(readExactBytes(stream, len), Charsets.UTF_8)
+                val errorMsg = String(reader.readExactBytes(len), Charsets.UTF_8)
                 throw IllegalStateException("Push V2 (SND2) failed: $errorMsg")
             }
 
-            check(id == SyncCommand.ID_OKAY) { "Unexpected SND2 response ID: $id" }
+            check(id == SyncCommand.ID_OKAY) { "Unexpected SND2 response tag: $id" }
         } finally {
             stream.close()
         }
@@ -164,37 +174,38 @@ public class AdbSyncClientV2(
         flags: Int = SyncFlags.FLAG_NONE,
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
+        require(flags == SyncFlags.FLAG_NONE) {
+            "Compression flags ($flags) are not supported in raw stream implementation."
+        }
+
         if (!supportsRecvV2) {
-            // 降级使用 V1 Pull
             return@withContext pull(remotePath, outputStream, onProgress)
         }
 
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         try {
             val fileStat = statV2(remotePath)
             check(fileStat.exists) { "Remote file does not exist: $remotePath" }
 
-            // 1. 发送 RCV2 请求
             val requestBytes = SyncCommandV2.createRequestV2(SyncCommandV2.ID_RCV2, 0, flags, remotePath)
             stream.write(requestBytes)
 
             var bytesRead = 0L
 
-            // 2. 接收 DATA 数据流
             while (true) {
-                val headerBytes = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+                val headerBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
                 val (id, len) = SyncCommand.parseHeader(headerBytes)
 
                 when (id) {
                     SyncCommand.ID_DATA -> {
-                        val chunk = readExactBytes(stream, len)
+                        val chunk = reader.readExactBytes(len)
                         outputStream.write(chunk)
                         bytesRead += len
                         onProgress?.invoke(bytesRead, fileStat.size)
                     }
                     SyncCommand.ID_DONE -> break
                     SyncCommand.ID_FAIL -> {
-                        val errorMsg = String(readExactBytes(stream, len), Charsets.UTF_8)
+                        val errorMsg = String(reader.readExactBytes(len), Charsets.UTF_8)
                         throw IllegalStateException("Pull V2 (RCV2) failed: $errorMsg")
                     }
                     else -> throw IllegalStateException("Unexpected pull V2 response tag: $id")

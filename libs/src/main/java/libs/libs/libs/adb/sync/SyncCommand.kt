@@ -16,9 +16,6 @@ public object SyncCommand {
 
     public const val HEADER_SIZE: Int = 8
 
-    /**
-     * 构建 8 字节的 Sync 请求 Header [4 bytes ID][4 bytes LE Value]
-     */
     public fun createHeader(id: String, value: Int): ByteArray {
         val buffer = ByteBuffer.allocate(HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
         buffer.put(id.toByteArray(Charsets.US_ASCII))
@@ -26,9 +23,6 @@ public object SyncCommand {
         return buffer.array()
     }
 
-    /**
-     * 解析 8 字节的 Sync 响应 Header
-     */
     public fun parseHeader(data: ByteArray): Pair<String, Int> {
         require(data.size >= HEADER_SIZE) { "Invalid Sync header size: ${data.size}" }
         val id = String(data, 0, 4, Charsets.US_ASCII)

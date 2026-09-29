@@ -4,7 +4,6 @@ import libs.libs.libs.adb.connect.AdbConnection
 import libs.libs.libs.adb.connect.AdbStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
@@ -23,40 +22,34 @@ public open class AdbSyncClient(
             ?: throw IllegalStateException("Failed to open ADB sync: service")
     }
 
-    protected suspend fun readExactBytes(stream: AdbStream, length: Int): ByteArray {
-        val buffer = ByteArrayOutputStream(length)
-        var remaining = length
+    protected suspend fun openSyncReader(): Pair<AdbStream, SyncStreamReader> {
+        val stream = openSyncStream()
+        return stream to SyncStreamReader(stream)
+    }
 
-        while (remaining > 0) {
-            val chunk = stream.read() ?: break
-            if (chunk.isNotEmpty()) {
-                val toWrite = minOf(chunk.size, remaining)
-                buffer.write(chunk, 0, toWrite)
-                remaining -= toWrite
-            }
-        }
-
-        check(buffer.size() == length) { "Unexpected EOF: expected $length bytes, got ${buffer.size()}" }
-        return buffer.toByteArray()
+    protected fun sanitizeMtime(mtime: Long): Int {
+        // 如果误传了毫秒时间戳 (大于 10 位数)，自动转换为秒级
+        val seconds = if (mtime > 9_999_999_999L) mtime / 1000 else mtime
+        return seconds.toInt()
     }
 
     /**
      * V1 Stat (STAT)
      */
     public suspend fun stat(remotePath: String): FileStat = withContext(Dispatchers.IO) {
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         try {
             val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
             val reqHeader = SyncCommand.createHeader(SyncCommand.ID_STAT, pathBytes.size)
 
             stream.write(reqHeader + pathBytes)
 
-            val respHeaderBytes = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+            val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
             val (id, _) = SyncCommand.parseHeader(respHeaderBytes)
 
-            check(id == SyncCommand.ID_STAT) { "Unexpected STAT response: $id" }
+            check(id == SyncCommand.ID_STAT) { "Unexpected STAT response tag: $id" }
 
-            val statBytes = readExactBytes(stream, 12)
+            val statBytes = reader.readExactBytes(12)
             val buf = ByteBuffer.wrap(statBytes).order(ByteOrder.LITTLE_ENDIAN)
 
             val mode = buf.int
@@ -73,7 +66,7 @@ public open class AdbSyncClient(
      * V1 Directory List (LIST / DENT)
      */
     public suspend fun list(remotePath: String): List<DirectoryEntry> = withContext(Dispatchers.IO) {
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         val entries = mutableListOf<DirectoryEntry>()
 
         try {
@@ -81,19 +74,19 @@ public open class AdbSyncClient(
             stream.write(SyncCommand.createHeader(SyncCommand.ID_LIST, pathBytes.size) + pathBytes)
 
             while (true) {
-                val headerBytes = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+                val headerBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
                 val (id, _) = SyncCommand.parseHeader(headerBytes)
 
                 when (id) {
                     SyncCommand.ID_DENT -> {
-                        val dentBytes = readExactBytes(stream, 16)
+                        val dentBytes = reader.readExactBytes(16)
                         val buf = ByteBuffer.wrap(dentBytes).order(ByteOrder.LITTLE_ENDIAN)
                         val mode = buf.int
                         val size = buf.int.toLong() and 0xFFFFFFFFL
                         val mtime = buf.int.toLong() and 0xFFFFFFFFL
                         val nameLen = buf.int
 
-                        val nameBytes = readExactBytes(stream, nameLen)
+                        val nameBytes = reader.readExactBytes(nameLen)
                         val name = String(nameBytes, Charsets.UTF_8)
 
                         if (name != "." && name != "..") {
@@ -122,7 +115,7 @@ public open class AdbSyncClient(
         mtime: Long = System.currentTimeMillis() / 1000,
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         try {
             val destinationStr = "$remotePath,$mode"
             val destBytes = destinationStr.toByteArray(Charsets.UTF_8)
@@ -143,18 +136,18 @@ public open class AdbSyncClient(
                 }
             }
 
-            val doneHeader = SyncCommand.createHeader(SyncCommand.ID_DONE, mtime.toInt())
+            val doneHeader = SyncCommand.createHeader(SyncCommand.ID_DONE, sanitizeMtime(mtime))
             stream.write(doneHeader)
 
-            val respHeaderBytes = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+            val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
             val (id, len) = SyncCommand.parseHeader(respHeaderBytes)
 
             if (id == SyncCommand.ID_FAIL) {
-                val errorMsg = String(readExactBytes(stream, len), Charsets.UTF_8)
+                val errorMsg = String(reader.readExactBytes(len), Charsets.UTF_8)
                 throw IllegalStateException("Push failed: $errorMsg")
             }
 
-            check(id == SyncCommand.ID_OKAY) { "Unexpected push response: $id" }
+            check(id == SyncCommand.ID_OKAY) { "Unexpected push response tag: $id" }
         } finally {
             stream.close()
         }
@@ -168,7 +161,7 @@ public open class AdbSyncClient(
         outputStream: OutputStream,
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
-        val stream = openSyncStream()
+        val (stream, reader) = openSyncReader()
         try {
             val fileStat = stat(remotePath)
             check(fileStat.exists) { "Remote file does not exist: $remotePath" }
@@ -179,19 +172,19 @@ public open class AdbSyncClient(
             var bytesRead = 0L
 
             while (true) {
-                val headerBytes = readExactBytes(stream, SyncCommand.HEADER_SIZE)
+                val headerBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
                 val (id, len) = SyncCommand.parseHeader(headerBytes)
 
                 when (id) {
                     SyncCommand.ID_DATA -> {
-                        val chunk = readExactBytes(stream, len)
+                        val chunk = reader.readExactBytes(len)
                         outputStream.write(chunk)
                         bytesRead += len
                         onProgress?.invoke(bytesRead, fileStat.size)
                     }
                     SyncCommand.ID_DONE -> break
                     SyncCommand.ID_FAIL -> {
-                        val errorMsg = String(readExactBytes(stream, len), Charsets.UTF_8)
+                        val errorMsg = String(reader.readExactBytes(len), Charsets.UTF_8)
                         throw IllegalStateException("Pull failed: $errorMsg")
                     }
                     else -> throw IllegalStateException("Unexpected pull response tag: $id")

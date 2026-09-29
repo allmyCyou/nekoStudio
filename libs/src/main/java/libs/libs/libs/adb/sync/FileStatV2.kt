@@ -1,11 +1,8 @@
 package libs.libs.libs.adb.sync
 
-/**
- * Sync v2 完整的 64 位文件元数据结构 (68 字节)
- */
 public data class FileStatV2(
     val path: String,
-    val error: Int,      // 0 表示成功，非 0 为 errno (如 ENOENT = 2)
+    val error: Int,      // 0 表示成功，非 0 为 errno
     val dev: Long,
     val ino: Long,
     val mode: Int,
@@ -18,6 +15,6 @@ public data class FileStatV2(
     val ctime: Long
 ) {
     val exists: Boolean get() = error == 0 && mode != 0
-    val isDirectory: Boolean get() = (mode and 0x4000) != 0
-    val isFile: Boolean get() = (mode and 0x8000) != 0
+    val isDirectory: Boolean get() = (mode and FilePermissions.S_IFDIR) != 0
+    val isFile: Boolean get() = (mode and FilePermissions.S_IFREG) != 0
 }

@@ -6,6 +6,6 @@ public data class DirectoryEntry(
     val size: Long,
     val mtime: Long
 ) {
-    val isDirectory: Boolean get() = (mode and 0x4000) != 0
-    val isFile: Boolean get() = (mode and 0x8000) != 0
+    val isDirectory: Boolean get() = (mode and FilePermissions.S_IFDIR) != 0
+    val isFile: Boolean get() = (mode and FilePermissions.S_IFREG) != 0
 }
