@@ -749,9 +749,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleAdbCommand(adbCmd: String) {
-        // 1. 直接获取 Service 里的 client
-        val client = adbService?.adbClient ?: run {
-            appendLog("[ERROR] ADB 服务未就绪！")
+        val client = adbSessionService?.getAdbClient()
+        if (client == null) {
+            appendLog("[error] ADB可能未初始化")
             return
         }
 
