@@ -579,6 +579,7 @@ class MainActivity : ComponentActivity() {
             when (intent?.action) {
                 // 单一处理，逻辑清晰不冲突，互不影响
                 UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    appendLog("[INFO] USB 主机设备已连接")
                     isUsbAttached = true
                     findHostDevice()
                 }

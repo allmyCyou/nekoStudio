@@ -45,6 +45,6 @@
     <string name="app_logs">我常常会因为操不到女粉而感到忧郁</string>
 
     <string name="shortlabel_string_running">正在运行的服务</string>
-    <string name="shortlabel_string_magnification">放大镜</string>
+    <string name="shortlabel_string_magnification">通知界面</string>
     <string name="shortlabel_string_dim">极暗</string>
 </resources>

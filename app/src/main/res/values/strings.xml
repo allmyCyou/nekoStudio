@@ -46,6 +46,6 @@
     <string name="permission_description">This is the private API permission of the application itself. Individual developers’ applications with the same series signature can access and call at will.</string>
  
     <string name="shortlabel_string_running">Running services</string>
-    <string name="shortlabel_string_magnification">magnifier</string>
+    <string name="shortlabel_string_magnification">notification</string>
     <string name="shortlabel_string_dim">extremely dark</string>
 </resources>

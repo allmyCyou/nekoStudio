@@ -24,7 +24,7 @@
         <intent
             android:action="android.intent.action.VIEW"
             android:targetPackage="com.android.settings"
-            android:targetClass="com.android.settings.Settings$MagnificationActivity" />
+            android:targetClass="com.android.settings.Settings$ConfigureNotificationSettingsActivity" />
     </shortcut>
 
     <shortcut

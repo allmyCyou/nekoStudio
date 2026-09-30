@@ -361,7 +361,7 @@ private fun SupportAndDependencySection() {
             InfoRow(label = "System", value = "Android 7.0 - 17")
             InfoRow(label = "api", value = "24 - 37")
             InfoRow(label = "abi", value = "arm64-v8a, armeabi-v7a, x86, x86_64, riscv64")
-            InfoRow(label = "github", value = "https://github.com/deleteFAILunknown/nekoStudio")
+            InfoRow(label = "github", value = "https://github.com/allmyCyou/nekoStudio")
             InfoRow(label = "fastboot数据目录", value = "/storage/emulated/0/Android/data/com.adb.kitty/files/flash")
             InfoRow(label = "adb数据目录", value = "/storage/emulated/0/Android/data/com.adb.kitty/files/flash")
             InfoRow(label = "cpu数据目录", value = "/storage/emulated/0/Android/data/com.adb.kitty/files/cpu")
