@@ -761,36 +761,100 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             runCatching {
                 when (subCmd) {
-                    // 直接调 client 的 API！
                     "connect" -> {
-                        val target = tokens.getOrNull(1) ?: return@launch
-                        val parts = target.split(":")
-                        client.connect(parts[0], parts.getOrNull(1)?.toIntOrNull() ?: 5555)
+                        // 支持: connect 10.45.16.152:5555 或 connect 10.45.16.152 5555
+                        val target = tokens.getOrNull(1) ?: run {
+                            appendLog("[error] 请指定 IP 和端口，例: connect 192.168.1.100:5555")
+                            return@launch
+                        }
+
+                        val host: String
+                        val port: Int
+                        if (target.contains(":")) {
+                            val parts = target.split(":")
+                            host = parts[0]
+                            port = parts.getOrNull(1)?.toIntOrNull() ?: 5555
+                        } else {
+                            host = target
+                            port = tokens.getOrNull(2)?.toIntOrNull() ?: 5555
+                        }
+
+                        appendLog("[info] 正在连接 $host:$port ...")
+                        client.connect(host, port)
                         appendLog("[success] 连接成功")
                     }
+
                     "pair" -> {
-                        val target = tokens.getOrNull(1) ?: return@launch
-                        val code = tokens.getOrNull(2) ?: ""
-                        val parts = target.split(":")
-                        client.pair(parts[0], parts[1].toInt(), code)
+                        // 支持 2 种格式:
+                        // 1. pair 10.45.16.152:42919 088758 (IP:PORT CODE)
+                        // 2. pair 10.45.16.152 42919 088758 (IP PORT CODE)
+                        val host: String
+                        val port: Int
+                        val code: String
+
+                        if (tokens.size >= 4) {
+                            host = tokens[1]
+                            port = tokens[2].toIntOrNull() ?: 0
+                            code = tokens[3]
+                        } else if (tokens.size >= 3) {
+                            val parts = tokens[1].split(":")
+                            host = parts[0]
+                            port = parts.getOrNull(1)?.toIntOrNull() ?: 0
+                            code = tokens[2]
+                        } else {
+                            appendLog("[error] 配对参数格式错误，例: pair 10.45.16.152:42919 088758")
+                            return@launch
+                        }
+
+                        if (port == 0 || code.isBlank()) {
+                            appendLog("[error] 无效的端口号或验证码")
+                            return@launch
+                        }
+
+                        appendLog("[info] 正在配对 $host:$port ($code)...")
+
+                        // 必须处理 pair 返回的 Result<String>
+                        val pairResult = client.pair(host, port, code)
+                        pairResult.onSuccess { msg ->
+                            appendLog("[success] 配对成功: $msg")
+                        }.onFailure { e ->
+                            appendLog("[error] 配对失败: ${e.message}")
+                        }
                     }
+
                     "shell" -> {
-                        val cmd = adbCmd.removePrefix("shell").trim()
+                        val cmd = cleanCmd.removePrefix("shell").trim()
                         val res = client.shell.execV2(cmd)
-                        appendLog(res.stdout)
+                        appendLog(res.stdout.ifEmpty { res.stderr })
                     }
+
                     "install" -> {
-                        val path = adbCmd.removePrefix("install").trim()
-                        client.installApk(File(path))
+                        val path = cleanCmd.removePrefix("install").trim()
+                        val apkFile = File(path)
+                        if (!apkFile.exists()) {
+                            appendLog("[error] APK 文件不存在: $path")
+                            return@launch
+                        }
+                        appendLog("[info] 正在安装 $path ...")
+                        val res = client.installApk(apkFile)
+                        res.onSuccess { appendLog("[success] 安装成功") }
+                           .onFailure { appendLog("[error] 安装失败: ${it.message}") }
                     }
+
+                    "disconnect" -> {
+                        client.disconnect()
+                        appendLog("[info] 已断开连接")
+                    }
+
                     else -> {
-                        // 透传 Shell
-                        val res = client.shell.execV2(adbCmd)
-                        appendLog(res.stdout)
+                        // 透传 Shell 命令
+                        val res = client.shell.execV2(cleanCmd)
+                        val output = res.stdout.ifEmpty { res.stderr }
+                        appendLog(output.ifEmpty { "[exec finish, exit code ${res.exitCode}]" })
                     }
                 }
-            }.onFailure {
-                appendLog("[error] ${it.localizedMessage}")
+            }.onFailure { e ->
+                appendLog("[error] 执行异常: ${e.localizedMessage}")
             }
         }
     }
