@@ -823,13 +823,13 @@ class MainActivity : ComponentActivity() {
                     }
 
                     "shell" -> {
-                        val cmd = cleanCmd.removePrefix("shell").trim()
+                        val cmd = subCmd.removePrefix("shell").trim()
                         val res = client.shell.execV2(cmd)
                         appendLog(res.stdout.ifEmpty { res.stderr })
                     }
 
                     "install" -> {
-                        val path = cleanCmd.removePrefix("install").trim()
+                        val path = subCmd.removePrefix("install").trim()
                         val apkFile = File(path)
                         if (!apkFile.exists()) {
                             appendLog("[error] APK 文件不存在: $path")
@@ -848,7 +848,7 @@ class MainActivity : ComponentActivity() {
 
                     else -> {
                         // 透传 Shell 命令
-                        val res = client.shell.execV2(cleanCmd)
+                        val res = client.shell.execV2(subCmd)
                         val output = res.stdout.ifEmpty { res.stderr }
                         appendLog(output.ifEmpty { "[exec finish, exit code ${res.exitCode}]" })
                     }
