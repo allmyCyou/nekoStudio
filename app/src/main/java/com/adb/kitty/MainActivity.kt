@@ -749,7 +749,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleAdbCommand(adbCmd: String) {
-        val client = adbSessionService?.getAdbClient()
+        val client = adbService?.getAdbClient()
         if (client == null) {
             appendLog("[error] ADB可能未初始化")
             return
