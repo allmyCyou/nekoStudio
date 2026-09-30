@@ -171,8 +171,7 @@ class AdbSessionService : Service() {
         updateShortcutIfNeeded()
         startNotificationTicker()
 
-        val keyManager = AdbKeyManager(applicationContext)
-        adbClient = AdbClient(keyManager)
+        val adbClient = AdbClient(keyManager = AdbKeyManager())
     }
 
 /*
