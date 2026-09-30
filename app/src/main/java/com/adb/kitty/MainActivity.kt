@@ -1249,10 +1249,14 @@ class MainActivity : ComponentActivity() {
                     val pi = PendingIntent.getBroadcast(this, 0, intent, flags)
                     usbManager.requestPermission(device, pi)
                 } else {
+                    // 获取物理设备节点路径，例如 /dev/bus/usb/001/002
+                    val nodePath = device.deviceName
+                    appendLog("[INFO] USB物理节点: $nodePath")
+
                     // 注意：在没有权限时直接获取 serialNumber 可能会返回 null 或抛出 SecurityException
                     val serial = try { device.serialNumber } catch (e: SecurityException) { "Permission Denied" }
                     appendLog("[INFO] 硬件序列号: ${serial ?: "unknown"}")
-                    
+
                     // 派发给 Service 处理
                     adbService?.connectToInterface(device, flashFolder)
                 }
