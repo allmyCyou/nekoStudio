@@ -153,13 +153,8 @@ class AdbSessionService : Service() {
 
     lateinit var adbClient: AdbClient
 
-    fun getAdbClient(): AdbClient? {
-        if (!::adbClient.isInitialized) {
-            Log.w("AdbSessionService", "adbClient 尚未初始化")
-            return null
-        }
-        return adbClient
-    }
+    val safeAdbClient: AdbClient?
+        get() = if (::adbClient.isInitialized) adbClient else null
 
     private var currentText: String = "00:00:00"
     private var activeForegroundTypes: Int = 0
