@@ -79,6 +79,9 @@ import java.io.*
 import java.net.*
 import java.lang.reflect.*
 
+import libs.libs.libs.adb.AdbClient
+import libs.libs.libs.adb.key.AdbKeyManager
+
 @Keep
 class AdbSessionService : Service() {
 
@@ -148,6 +151,9 @@ class AdbSessionService : Service() {
         triggerTickerRefreshImmediate()
     }
 
+    lateinit var adbClient: AdbClient
+        private set
+
     private var currentText: String = "00:00:00"
     private var activeForegroundTypes: Int = 0
     private var serviceStartTime = 0L
@@ -164,6 +170,9 @@ class AdbSessionService : Service() {
         // 运行前台服务被要求在 1秒或者2秒 内发送通知，必需发送通知，哪怕用户没有授予通知权限，也是可以正常运行的，通知并不会影响到前台服务，唯一受影响的只有视觉上
         updateShortcutIfNeeded()
         startNotificationTicker()
+
+        val keyManager = AdbKeyManager(applicationContext)
+        adbClient = AdbClient(keyManager)
     }
 
 /*
@@ -1172,6 +1181,7 @@ class AdbSessionService : Service() {
         releaseWakeLock()
         terminateCurrentCommand()
         closeUsbConnection()
+        adbClient.disconnect()
         super.onDestroy()
     }
 }

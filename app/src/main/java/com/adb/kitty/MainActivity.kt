@@ -663,6 +663,10 @@ class MainActivity : ComponentActivity() {
         when {
             cmd.startsWith("adb ") -> {
                 appendLog("[INFO] ADB >> $cmd")
+                val adbCmd = cmd.removePrefix("adb ").trim()
+                if (adbCmd.isNotEmpty()) {
+                    handleAdbCommand(adbCmd)
+                }
             }
 
             cmd.startsWith("neko ") -> {
@@ -743,7 +747,54 @@ class MainActivity : ComponentActivity() {
             else -> handlePhysicalFallback(cmd)
         }
     }
-    
+
+    private fun handleAdbCommand(adbCmd: String) {
+        // 1. 直接获取 Service 里的 client
+        val client = adbService?.adbClient ?: run {
+            appendLog("[ERROR] ADB 服务未就绪！")
+            return
+        }
+
+        val tokens = adbCmd.split("\\s+".toRegex())
+        val subCmd = tokens.getOrNull(0)?.lowercase() ?: return
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                when (subCmd) {
+                    // 直接调 client 的 API！
+                    "connect" -> {
+                        val target = tokens.getOrNull(1) ?: return@launch
+                        val parts = target.split(":")
+                        client.connect(parts[0], parts.getOrNull(1)?.toIntOrNull() ?: 5555)
+                        appendLog("[success] 连接成功")
+                    }
+                    "pair" -> {
+                        val target = tokens.getOrNull(1) ?: return@launch
+                        val code = tokens.getOrNull(2) ?: ""
+                        val parts = target.split(":")
+                        client.pair(parts[0], parts[1].toInt(), code)
+                    }
+                    "shell" -> {
+                        val cmd = adbCmd.removePrefix("shell").trim()
+                        val res = client.shell.execV2(cmd)
+                        appendLog(res.stdout)
+                    }
+                    "install" -> {
+                        val path = adbCmd.removePrefix("install").trim()
+                        client.installApk(File(path))
+                    }
+                    else -> {
+                        // 透传 Shell
+                        val res = client.shell.execV2(adbCmd)
+                        appendLog(res.stdout)
+                    }
+                }
+            }.onFailure {
+                appendLog("[error] ${it.localizedMessage}")
+            }
+        }
+    }
+
     private fun executeSmartIntent(activityContext: ComponentActivity, content: String, packageName: String) {
         try {
             val isUrl = content.startsWith("http://") || content.startsWith("https://")
