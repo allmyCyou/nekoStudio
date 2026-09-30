@@ -252,9 +252,27 @@ class FastbootManager(
         }
 
         val protocolCmd = when (action) {
-            "getvar" -> if (parts.size >= 2) "${parts[0]}:${parts.drop(1).joinToString(" ")}" else parts[0]
-            "erase", "format", "set_active" -> if (parts.size >= 2) "$action:${parts[1]}" else ""
-            else -> cleanCmd
+            "getvar" -> {
+                if (parts.size >= 2) "${parts[0]}:${parts.drop(1).joinToString(" ")}" else parts[0]
+            }
+            "oem" -> {
+                cleanCmd 
+            }
+            "reboot" -> {
+                cleanCmd 
+            }
+            "erase" -> {
+                if (parts.size >= 2) "$action:${parts[1]}" else ""
+            }
+            "format" -> {
+                if (parts.size >= 2) "$action:${parts[1]}" else ""
+            }
+            "set_active" -> {
+                if (parts.size >= 2) "$action:${parts[1]}" else ""
+            }
+            else -> {
+                cleanCmd
+            }
         }
 
         withContext(Dispatchers.Main) {
