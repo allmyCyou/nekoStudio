@@ -40,7 +40,7 @@ class AdbSpake2Engine(
     private enum class State { INIT, MSG_GENERATED, KEY_GENERATED }
 
     companion object {
-        // 严格对齐 BoringSSL/AOSP 官方 32 字节 (64 位 Hex 字符) 的 Ed25519 基点 M, N 与 群阶 Group Order
+        // 严格对齐 BoringSSL / AOSP 官方 spake2.c 的 32 字节 Ed25519 基点 M, N 与 群阶 Group Order
         private val M_POINT_ENCODED = hexToBytes("d75a7e4bf6ddd9adb6626d32131c6b5c51a1e347a3478f53cfcf441b88eed12e")
         private val N_POINT_ENCODED = hexToBytes("d4fe4800ce6117e1b41d4c8d21a322103dbddcbd06af680d71329a11693bc778")
         private val GROUP_ORDER     = hexToBytes("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")
@@ -52,11 +52,19 @@ class AdbSpake2Engine(
             try {
                 require(M_POINT_ENCODED.size == 32) { "M point length must be 32 bytes" }
                 require(N_POINT_ENCODED.size == 32) { "N point length must be 32 bytes" }
-                
-                LIB_M = CompressedEdwardsY(M_POINT_ENCODED).decompress()
-                LIB_N = CompressedEdwardsY(N_POINT_ENCODED).decompress()
+
+                LIB_M = try {
+                    CompressedEdwardsY(M_POINT_ENCODED).decompress()
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Decompressing M_POINT failed", e)
+                }
+
+                LIB_N = try {
+                    CompressedEdwardsY(N_POINT_ENCODED).decompress()
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Decompressing N_POINT failed", e)
+                }
             } catch (e: Throwable) {
-                // 打印详细崩溃原因，方便调试
                 e.printStackTrace()
                 throw ExceptionInInitializerError("AdbSpake2Engine static init failed: ${e.message}")
             }
