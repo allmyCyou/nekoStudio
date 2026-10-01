@@ -137,12 +137,12 @@ public class AdbPairingClient(
     }
 
     /**
-     * 写入带 4 字节 Little-Endian 长度标头的 PairingPacket 报文
+     * 写入带 4 字节 Big-Endian (网络字节序) 长度标头的 PairingPacket 报文
      */
     private fun sendPacket(out: DataOutputStream, packet: PairingPacket) {
         val bytes = AdbProtoUtils.encodePairingPacket(packet)
         val lenBytes = ByteBuffer.allocate(4)
-            .order(ByteOrder.LITTLE_ENDIAN)
+            .order(ByteOrder.BIG_ENDIAN) // 修复：改为 BIG_ENDIAN
             .putInt(bytes.size)
             .array()
 
@@ -152,14 +152,14 @@ public class AdbPairingClient(
     }
 
     /**
-     * 读取带 4 字节 Little-Endian 长度标头的 PairingPacket 报文
+     * 读取带 4 字节 Big-Endian (网络字节序) 长度标头的 PairingPacket 报文
      */
     private fun receivePacket(input: DataInputStream): PairingPacket {
         val lenBytes = ByteArray(4)
         input.readFully(lenBytes)
 
         val len = ByteBuffer.wrap(lenBytes)
-            .order(ByteOrder.LITTLE_ENDIAN)
+            .order(ByteOrder.BIG_ENDIAN) // 修复：改为 BIG_ENDIAN
             .int
 
         require(len in 1..65536) { "Invalid packet length received: $len" }
