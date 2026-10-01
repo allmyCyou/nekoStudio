@@ -7,11 +7,15 @@ import kotlinx.serialization.decodeFromByteArray
 import kotlinx.serialization.encodeToByteArray
 import kotlinx.serialization.protobuf.ProtoBuf
 import libs.libs.libs.adb.key.AdbKeyManager
+import libs.libs.libs.adb.tls.AdbTlsCertificate
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.KeyStore
 import java.security.SecureRandom
+import java.security.cert.X509Certificate
+import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 
@@ -40,10 +44,26 @@ public class AdbPairingClient(
 
             Socket().use { rawSocket ->
                 rawSocket.soTimeout = READ_TIMEOUT_MS
+                rawSocket.tcpNoDelay = true
                 rawSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
 
+                // 1. 获取密钥对并利用 AdbTlsCertificate 生成自签名 X.509 客户端证书
+                val keyPair = keyManager.getKeyPair()
+                val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
+
+                // 2. 构建 PKCS12 内存 KeyStore
+                val keyStore = KeyStore.getInstance("PKCS12").apply {
+                    load(null, null)
+                    setKeyEntry("adb_pair_client", keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
+                }
+
+                val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+                    init(keyStore, KEY_PASSWORD.toCharArray())
+                }
+
+                // 3. 初始化 TLS 1.3 上下文（带上 kmf.keyManagers 客户端凭证）
                 val sslContext = SSLContext.getInstance("TLSv1.3").apply {
-                    init(null, arrayOf(AdbPairingTrustManager()), SecureRandom())
+                    init(kmf.keyManagers, arrayOf(AdbPairingTrustManager()), SecureRandom())
                 }
 
                 val sslSocket = sslContext.socketFactory.createSocket(
@@ -53,13 +73,15 @@ public class AdbPairingClient(
                     true
                 ) as SSLSocket
 
+                sslSocket.enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
+
                 sslSocket.use { tlsSocket ->
                     tlsSocket.startHandshake()
 
                     val inputStream = DataInputStream(tlsSocket.inputStream)
                     val outputStream = DataOutputStream(tlsSocket.outputStream)
 
-                    // 1. 【SPAKE2 阶段 1】发送 Client Hello
+                    // 4. 【SPAKE2 阶段 1】发送 Client Hello
                     val rawClientHello = spake2Engine.generateClientHello()
                     val clientPacket = PairingPacket(
                         type = PairingPacket.Type.SPAKE2_MSG,
@@ -67,15 +89,14 @@ public class AdbPairingClient(
                     )
                     sendPacket(outputStream, clientPacket)
 
-                    // 2. 【SPAKE2 阶段 2】接收 Server Hello 并派生密钥
+                    // 5. 【SPAKE2 阶段 2】接收 Server Hello 并派生密钥
                     val serverPacket = receivePacket(inputStream)
                     require(serverPacket.type == PairingPacket.Type.SPAKE2_MSG) {
                         "Expected SPAKE2_MSG packet type, got: ${serverPacket.type}"
                     }
                     spake2Engine.processServerHelloAndDeriveKey(serverPacket.payload)
 
-                    // 3. 【密文传输阶段】构建 PeerInfo Protobuf 消息，序列化后加密发送
-                    // 使用 keyManager.getAdbPublicKeyBytes() 确保包含末尾 '\0'
+                    // 6. 【密文传输阶段】构建 PeerInfo Protobuf 消息，序列化后加密发送
                     val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
                     val clientPeerInfo = PeerInfo(
                         status = PeerInfo.Status.OK,
@@ -90,7 +111,7 @@ public class AdbPairingClient(
                     )
                     sendPacket(outputStream, infoPacket)
 
-                    // 4. 【结果校验】读取并解密对端 PeerInfo 响应
+                    // 7. 【结果校验】读取并解密对端 PeerInfo 响应
                     val responsePacket = receivePacket(inputStream)
                     require(responsePacket.type == PairingPacket.Type.PEER_INFO) {
                         "Expected PEER_INFO packet type, got: ${responsePacket.type}"
@@ -138,5 +159,6 @@ public class AdbPairingClient(
     companion object {
         private const val CONNECT_TIMEOUT_MS = 10000
         private const val READ_TIMEOUT_MS = 10000
+        private const val KEY_PASSWORD = "adb_pair_password"
     }
 }
