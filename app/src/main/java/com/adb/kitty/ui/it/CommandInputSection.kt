@@ -86,15 +86,16 @@ fun <T> CommandInputSection(
     var anchorBoundsInWindow by remember { mutableStateOf(IntRect.Zero) }
 
     val density = LocalDensity.current
-    val configuration = LocalConfiguration.current
-    val screenHeightDp = configuration.screenHeightDp.dp
+    val windowInfo = LocalWindowInfo.current
 
-    // 纯 remember 计算最大高度：根据输入框底边在屏幕上的实际像素位置推算，绝不在 calculatePosition 阶段触发副作用
-    val maxMenuHeightDp = remember(anchorBoundsInWindow, screenHeightDp, density) {
+    val maxMenuHeightDp = remember(anchorBoundsInWindow, windowInfo.containerSize, density) {
         if (anchorBoundsInWindow == IntRect.Zero) 200.dp
         else {
-            val anchorBottomDp = with(density) { anchorBoundsInWindow.bottom.toDp() }
-            (screenHeightDp - anchorBottomDp - 16.dp).coerceAtLeast(80.dp)
+            val containerHeightPx = windowInfo.containerSize.height
+            val availablePx = (containerHeightPx - anchorBoundsInWindow.bottom).coerceAtLeast(0)
+            with(density) {
+                (availablePx.toDp() - 16.dp).coerceAtLeast(80.dp)
+            }
         }
     }
 
