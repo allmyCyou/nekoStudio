@@ -8,6 +8,7 @@ import org.bouncycastle.crypto.params.RSAKeyGenerationParameters
 import org.bouncycastle.crypto.params.RSAKeyParameters
 import org.bouncycastle.crypto.params.RSAPrivateCrtKeyParameters
 import org.bouncycastle.crypto.signers.RSADigestSigner
+import java.io.File
 import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -15,7 +16,10 @@ import java.security.SecureRandom
 import java.security.spec.RSAPrivateCrtKeySpec
 import java.security.spec.RSAPublicKeySpec
 
-public class AdbKeyManager {
+public class AdbKeyManager(
+    public var privateKeyFile: File? = null,
+    public var publicKeyFile: File? = null
+) {
 
     @Volatile
     private var privateKey: AsymmetricKeyParameter? = null
@@ -27,23 +31,92 @@ public class AdbKeyManager {
         get() = privateKey != null && publicKeyString != null
 
     /**
-     * 加载现有的 adbkey (PEM 文本) 和 adbkey.pub (可选)
-     * 若未传入 adbKeyPub，将自动从私钥推导生成
+     * 指定密钥存放目录并自动加载/初始化密钥。
+     * - 目录中存在 `adbkey` 时优先读取磁盘文件；
+     * - 目录中无密钥时，自动生成新密钥并持久化保存。
      */
-    public fun loadKeys(adbKeyPem: String, adbKeyPub: String? = null) {
-        val privKey = AdbKeySerializer.privateKeyFromPem(adbKeyPem)
-        val pubStr = if (!adbKeyPub.isNullOrBlank()) {
-            adbKeyPub.trim()
-        } else {
-            val pubParams = AdbKeyUtils.extractPublicKeyParameters(privKey)
-            AdbKeyUtils.convertToAdbPublicKeyString(pubParams)
-        }
-        this.privateKey = privKey
-        this.publicKeyString = pubStr
+    public fun initFromDirectory(keyDir: File, comment: String = "adb@key"): AdbKeyPair {
+        keyDir.mkdirs()
+        val privFile = File(keyDir, "adbkey")
+        val pubFile = File(keyDir, "adbkey.pub")
+        return loadOrGenerateKeys(privFile, pubFile, comment)
     }
 
     /**
-     * 生成全新的 2048 位 RSA 密钥对
+     * 核心加载逻辑：优先从磁盘读，读失败或不存在时才生成新密钥并存盘
+     */
+    public fun loadOrGenerateKeys(
+        privFile: File,
+        pubFile: File,
+        comment: String = "adb@key"
+    ): AdbKeyPair {
+        this.privateKeyFile = privFile
+        this.publicKeyFile = pubFile
+
+        if (privFile.exists() && privFile.length() > 0) {
+            try {
+                val privPem = privFile.readText()
+                val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
+                
+                loadKeys(privPem, pubStr)
+
+                // 自动补齐丢失的公钥文件
+                if (!pubFile.exists() || pubFile.length() == 0L) {
+                    pubFile.parentFile?.mkdirs()
+                    pubFile.writeText(getAdbPublicKeyString())
+                }
+
+                val privKey = this.privateKey!!
+                val pubParams = AdbKeyUtils.extractPublicKeyParameters(privKey)
+                return AdbKeyPair(privKey, pubParams, getAdbPublicKeyString())
+            } catch (_: Exception) {
+                // 文件损坏时，重新生成并覆盖坏文件
+                return generateKeyPair(comment)
+            }
+        } else {
+            return generateKeyPair(comment)
+        }
+    }
+
+    /**
+     * 检查并确保密钥加载。如果未加载，优先根据配置的路径加载，无路径或不存在才生成。
+     */
+    public fun ensureLoaded(comment: String = "adb@key") {
+        if (isLoaded) return
+
+        val privFile = privateKeyFile
+        val pubFile = publicKeyFile
+
+        if (privFile != null && pubFile != null) {
+            loadOrGenerateKeys(privFile, pubFile, comment)
+        } else {
+            generateKeyPair(comment)
+        }
+    }
+
+    /**
+     * 设置文件路径并自动加载；如果文件不存在则不加载，留给后续自动生成并保存
+     */
+    public fun setupFilesAndLoad(privFile: File, pubFile: File) {
+        this.privateKeyFile = privFile
+        this.publicKeyFile = pubFile
+
+        if (privFile.exists() && privFile.length() > 0) {
+            val privPem = privFile.readText()
+            val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
+            loadKeys(privPem, pubStr)
+
+            // 如果公钥文件缺失，自动根据私钥补充生成公钥文件
+            if (!pubFile.exists() || pubFile.length() == 0L) {
+                pubFile.parentFile?.mkdirs()
+                pubFile.writeText(getAdbPublicKeyString())
+            }
+        }
+    }
+
+    /**
+     * 生成全新 2048 位 RSA 密钥对。
+     * 若已配置 privateKeyFile 与 publicKeyFile，自动持久化保存至本地磁盘。
      */
     public fun generateKeyPair(comment: String = "adb@key"): AdbKeyPair {
         val generator = RSAKeyPairGenerator()
@@ -65,12 +138,33 @@ public class AdbKeyManager {
         this.privateKey = privKey
         this.publicKeyString = pubKeyStr
 
-        return AdbKeyPair(privKey, pubKeyParams, pubKeyStr)
+        val keyPair = AdbKeyPair(privKey, pubKeyParams, pubKeyStr)
+
+        // 绑定路径时自动写入磁盘
+        privateKeyFile?.let { file ->
+            file.parentFile?.mkdirs()
+            file.writeText(keyPair.toPem())
+        }
+        publicKeyFile?.let { file ->
+            file.parentFile?.mkdirs()
+            file.writeText(pubKeyStr)
+        }
+
+        return keyPair
     }
 
-    /**
-     * CMD_AUTH 阶段收到 AUTH_TOKEN 时进行 SHA1WithRSA 签名
-     */
+    public fun loadKeys(adbKeyPem: String, adbKeyPub: String? = null) {
+        val privKey = AdbKeySerializer.privateKeyFromPem(adbKeyPem)
+        val pubStr = if (!adbKeyPub.isNullOrBlank()) {
+            adbKeyPub.trim()
+        } else {
+            val pubParams = AdbKeyUtils.extractPublicKeyParameters(privKey)
+            AdbKeyUtils.convertToAdbPublicKeyString(pubParams)
+        }
+        this.privateKey = privKey
+        this.publicKeyString = pubStr
+    }
+
     public fun signToken(token: ByteArray): ByteArray {
         val privKey = privateKey ?: throw IllegalStateException("PrivateKey is not loaded")
         val signer = RSADigestSigner(SHA1Digest())
@@ -88,9 +182,6 @@ public class AdbKeyManager {
         return "$keyStr\u0000".toByteArray(Charsets.UTF_8)
     }
 
-    /**
-     * 将 BouncyCastle 的 AsymmetricKeyParameter 转换为 Java 标准 java.security.KeyPair
-     */
     public fun getKeyPair(): KeyPair {
         val privParams = (privateKey as? RSAPrivateCrtKeyParameters)
             ?: throw IllegalStateException("PrivateKey is not loaded or not a valid RSAPrivateCrtKeyParameters")

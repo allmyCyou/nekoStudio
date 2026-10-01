@@ -117,12 +117,10 @@ public class AdbClient(
     }
 
     /**
-     * 检查并确保 RSA 密钥已被加载或自动生成
+     * 检查并确保 RSA 密钥已被正确加载或初始化（优先从磁盘读取，文件不存在时才自动生成）
      */
     private fun ensureKeyLoaded() {
-        if (!keyManager.isLoaded) {
-            keyManager.generateKeyPair()
-        }
+        keyManager.ensureLoaded()
     }
 
     // 提权与重启 API (直接对接 root 模块)
