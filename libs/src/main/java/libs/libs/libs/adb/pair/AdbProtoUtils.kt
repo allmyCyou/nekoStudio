@@ -35,7 +35,8 @@ public object AdbProtoUtils {
     public fun decodePairingPacket(bytes: ByteArray): PairingPacket {
         if (bytes.isEmpty()) return PairingPacket()
         val input = ByteArrayInputStream(bytes)
-        var type = PairingPacket.Type.UNKNOWN
+        // 默认类型直接初始化为 SPAKE2_MSG (0)
+        var type = PairingPacket.Type.SPAKE2_MSG 
         var payload = byteArrayOf()
 
         try {
@@ -60,7 +61,6 @@ public object AdbProtoUtils {
                 }
             }
         } catch (_: EOFException) {
-            // 安全捕获截断数据
         }
         return PairingPacket(type, payload)
     }

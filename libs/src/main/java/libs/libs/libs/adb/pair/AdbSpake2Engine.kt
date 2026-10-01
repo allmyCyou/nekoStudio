@@ -220,19 +220,28 @@ class AdbSpake2Engine(
         val order = MutableScalar(GROUP_ORDER)
         val tmp = MutableScalar()
 
+        // 💡 必须在任何 addInPlace 修改前提取原始字节的 bit0, bit1, bit2
+        val firstByte = reducedPasswordScalar[0].toInt() and 0xFF
+        val bit0 = firstByte and 1
+        val bit1 = (firstByte ushr 1) and 1
+        val bit2 = (firstByte ushr 2) and 1
+
         try {
+            // Step 1: Check bit 0
             tmp.reset()
-            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(passwordScalar.getByte(0).toInt() and 1, 1))
+            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit0, 1))
             passwordScalar.addInPlace(tmp)
             order.dblInPlace()
 
+            // Step 2: Check bit 1
             tmp.reset()
-            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(passwordScalar.getByte(0).toInt() and 2, 2))
+            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit1, 1))
             passwordScalar.addInPlace(tmp)
             order.dblInPlace()
 
+            // Step 3: Check bit 2
             tmp.reset()
-            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(passwordScalar.getByte(0).toInt() and 4, 4))
+            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit2, 1))
             passwordScalar.addInPlace(tmp)
 
             return passwordScalar.getBytes().clone()
