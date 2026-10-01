@@ -86,9 +86,21 @@ public class AdbPairingClient(
 
                     // 3. 接收 Server Hello (SPAKE2 阶段 2)
                     val serverPacket = receivePacket(inputStream)
+
+                    // 校验包类型
                     require(serverPacket.type == PairingPacket.Type.SPAKE2_MSG) {
                         "Expected SPAKE2_MSG packet type, got: ${serverPacket.type}"
                     }
+
+                    // 💡 增加对 Server Hello Payload 长度的针对性判断
+                    if (serverPacket.payload.isEmpty()) {
+                        throw IOException("配对失败：手机端拒绝了 Client Hello (返回空数据)。请确认配对码是否正确、配对弹窗是否处于打开状态。")
+                    }
+
+                    require(serverPacket.payload.size == 32) {
+                        "Server Hello 数据包长度异常，期望 32 字节，实际收到 ${serverPacket.payload.size} 字节。"
+                    }
+
                     spake2Engine.processServerHelloAndDeriveKey(serverPacket.payload)
 
                     // 4. 发送 PeerInfo 客户端公钥 (SPAKE2 加密)

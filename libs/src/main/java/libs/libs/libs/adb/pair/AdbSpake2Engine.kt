@@ -40,9 +40,9 @@ class AdbSpake2Engine(
     private enum class State { INIT, MSG_GENERATED, KEY_GENERATED }
 
     companion object {
-        // BoringSSL 特有的 Ed25519 基点 M 和 N (32 字节压缩 Edwards 点)
-        private val M_POINT_ENCODED = hexToBytes("5ada7e4bf6ddd9adb6626d32131c6b5c51a1e347a3478f53cfcf441b88eed12e")
-        private val N_POINT_ENCODED = hexToBytes("10e3df0ae37d8e7a99b5fe74b44672103dbddcbd06af680d71329a11693bc778")
+        // 💡 官方 BoringSSL 正确的 Ed25519 基点 M 和 N (32 字节 / 64 个 Hex 字符)
+        private val M_POINT_ENCODED = hexToBytes("d75a7e4bf6ddd9adb6626d32131c6b5c511ae347a3478f53cfcf441b88eed12e")
+        private val N_POINT_ENCODED = hexToBytes("d4fe4800ce6117e1b41d4c8d21a322123dbddcbd06af680d71329a11693bc778")
         private val GROUP_ORDER = hexToBytes("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")
 
         private val LIB_M: EdwardsPoint
