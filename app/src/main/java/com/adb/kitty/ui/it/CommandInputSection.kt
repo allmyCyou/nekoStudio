@@ -70,7 +70,7 @@ fun <T> CommandInputSection(
     val coroutineScope = rememberCoroutineScope()
     var focusInteraction by remember { mutableStateOf<FocusInteraction.Focus?>(null) }
 
-    // 当输入框内容发生变化时，自动同步展开状态
+    // 当输入框内容发生变化时，根据内容是否为空自动同步展开状态
     LaunchedEffect(query.text) {
         if (query.text.isNotEmpty() && !expanded) {
             onExpandedChange(true)
@@ -88,15 +88,23 @@ fun <T> CommandInputSection(
     val view = LocalView.current
     val density = LocalDensity.current
 
-    // 仅计算“输入框底部”到“视图/屏幕物理底部”的绝对可用空间，绝不扣除软键盘高度
-    val maxMenuHeightDp = remember(anchorBoundsInWindow, view.height, density) {
+    // 实时监听软键盘 (ime) 和 底部导航栏 (navigationBars) 的高度
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val navBottom = WindowInsets.navigationBars.getBottom(density)
+    val bottomInset = maxOf(imeBottom, navBottom)
+
+    // 精确计算“输入框底部”到“软键盘顶部”之间的可用高度
+    val maxMenuHeightDp = remember(anchorBoundsInWindow, view.height, bottomInset, density) {
         if (anchorBoundsInWindow == IntRect.Zero) {
             200.dp
         } else {
-            val availablePx = (view.height - anchorBoundsInWindow.bottom).coerceAtLeast(0)
+            // 软键盘顶部的物理像素 Y 坐标
+            val visibleBottomPx = view.height - bottomInset
+            // 计算可放置菜单的像素高度
+            val availablePx = (visibleBottomPx - anchorBoundsInWindow.bottom).coerceAtLeast(0)
+
             with(density) {
-                // 上限 200.dp，下限 40.dp
-                availablePx.toDp().coerceAtMost(200.dp).coerceAtLeast(40.dp)
+                availablePx.toDp()
             }
         }
     }
@@ -247,8 +255,8 @@ fun <T> CommandInputSection(
             contentPadding = OutlinedTextFieldDefaults.contentPaddingWithLabel()
         )
 
-        // 下拉菜单：直接固定在输入框正下方，不受软键盘显示影响
-        if (expanded && query.text.isNotEmpty() && displayItems.isNotEmpty()) {
+        // 下拉菜单：高度动态自适应，限制在输入框底部与软键盘顶部之间
+        if (expanded && query.text.isNotEmpty() && displayItems.isNotEmpty() && maxMenuHeightDp > 10.dp) {
             Popup(
                 popupPositionProvider = customPositionProvider,
                 onDismissRequest = { onExpandedChange(false) },
