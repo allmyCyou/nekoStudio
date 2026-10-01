@@ -1,14 +1,8 @@
 package libs.libs.libs.adb.pair
 
-import kotlinx.serialization.ExperimentalSerializationApi
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.protobuf.ProtoNumber
-
-@OptIn(ExperimentalSerializationApi::class)
-@Serializable
 public data class PeerInfo(
-    @ProtoNumber(1) val status: Int = Status.UNKNOWN,
-    @ProtoNumber(2) val pubKey: ByteArray = byteArrayOf()
+    val status: Int = Status.UNKNOWN,
+    val pubKey: ByteArray = byteArrayOf()
 ) {
     public object Status {
         public const val UNKNOWN: Int = 0

@@ -2,16 +2,10 @@ package libs.libs.libs.adb.pair
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.ExperimentalSerializationApi
-import kotlinx.serialization.decodeFromByteArray
-import kotlinx.serialization.encodeToByteArray
-import kotlinx.serialization.protobuf.ProtoBuf
 import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.tls.AdbTlsCertificate
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.KeyStore
@@ -21,7 +15,6 @@ import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 
-@OptIn(ExperimentalSerializationApi::class)
 public class AdbPairingClient(
     private val keyManager: AdbKeyManager
 ) : AdbPairing {
@@ -49,11 +42,9 @@ public class AdbPairingClient(
                 rawSocket.tcpNoDelay = true
                 rawSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
 
-                // 1. 获取密钥对并利用 AdbTlsCertificate 生成自签名 X.509 客户端证书
                 val keyPair = keyManager.getKeyPair()
                 val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
 
-                // 2. 构建 PKCS12 内存 KeyStore
                 val keyStore = KeyStore.getInstance("PKCS12").apply {
                     load(null, null)
                     setKeyEntry("adb_pair_client", keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
@@ -63,7 +54,6 @@ public class AdbPairingClient(
                     init(keyStore, KEY_PASSWORD.toCharArray())
                 }
 
-                // 3. 初始化 TLS 1.3 上下文（带上 kmf.keyManagers 客户端凭证）
                 val sslContext = SSLContext.getInstance("TLSv1.3").apply {
                     init(kmf.keyManagers, arrayOf(AdbPairingTrustManager()), SecureRandom())
                 }
@@ -83,7 +73,7 @@ public class AdbPairingClient(
                     val inputStream = DataInputStream(tlsSocket.inputStream)
                     val outputStream = DataOutputStream(tlsSocket.outputStream)
 
-                    // 4. 【SPAKE2 阶段 1】发送 Client Hello
+                    // 1. 发送 Client Hello
                     val rawClientHello = spake2Engine.generateClientHello()
                     val clientPacket = PairingPacket(
                         type = PairingPacket.Type.SPAKE2_MSG,
@@ -91,20 +81,20 @@ public class AdbPairingClient(
                     )
                     sendPacket(outputStream, clientPacket)
 
-                    // 5. 【SPAKE2 阶段 2】接收 Server Hello 并派生密钥
+                    // 2. 接收 Server Hello
                     val serverPacket = receivePacket(inputStream)
                     require(serverPacket.type == PairingPacket.Type.SPAKE2_MSG) {
                         "Expected SPAKE2_MSG packet type, got: ${serverPacket.type}"
                     }
                     spake2Engine.processServerHelloAndDeriveKey(serverPacket.payload)
 
-                    // 6. 【密文传输阶段】构建 PeerInfo Protobuf 消息，序列化后加密发送
+                    // 3. 构建 PeerInfo 并加密发送
                     val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
                     val clientPeerInfo = PeerInfo(
                         status = PeerInfo.Status.OK,
                         pubKey = pubKeyBytes
                     )
-                    val serializedPeerInfo = protoBuf.encodeToByteArray(clientPeerInfo)
+                    val serializedPeerInfo = AdbProtoUtils.encodePeerInfo(clientPeerInfo)
                     val encryptedPeerInfo = spake2Engine.encryptPayload(serializedPeerInfo)
 
                     val infoPacket = PairingPacket(
@@ -113,14 +103,14 @@ public class AdbPairingClient(
                     )
                     sendPacket(outputStream, infoPacket)
 
-                    // 7. 【结果校验】读取并解密对端 PeerInfo 响应
+                    // 4. 接收对端 PeerInfo 响应
                     val responsePacket = receivePacket(inputStream)
                     require(responsePacket.type == PairingPacket.Type.PEER_INFO) {
                         "Expected PEER_INFO packet type, got: ${responsePacket.type}"
                     }
 
                     val decryptedResponse = spake2Engine.decryptPayload(responsePacket.payload)
-                    val serverPeerInfo = protoBuf.decodeFromByteArray<PeerInfo>(decryptedResponse)
+                    val serverPeerInfo = AdbProtoUtils.decodePeerInfo(decryptedResponse)
 
                     if (serverPeerInfo.status == PeerInfo.Status.OK) {
                         val peerPubKey = if (serverPeerInfo.pubKey.isNotEmpty()) {
@@ -143,43 +133,21 @@ public class AdbPairingClient(
         }
     }
 
-    @OptIn(ExperimentalSerializationApi::class)
-    private val protoBuf = ProtoBuf {
-        // 关键：强制序列化默认值，避免 Protobuf 字段缺失导致 Parse 报错
-        encodeDefaults = true 
-    }
-
-    /**
-     * 写入带 4 字节 Little-Endian 长度前缀的 Protobuf 报文
-     */
     private fun sendPacket(out: DataOutputStream, packet: PairingPacket) {
-        val bytes = protoBuf.encodeToByteArray(packet)
-        val lenBytes = ByteBuffer.allocate(4)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .putInt(bytes.size)
-            .array()
-
-        out.write(lenBytes)
+        val bytes = AdbProtoUtils.encodePairingPacket(packet)
+        // AOSP pairing_channel.cpp 中使用 htonl -> 大端序（Big-Endian）
+        out.writeInt(bytes.size)
         out.write(bytes)
         out.flush()
     }
 
-    /**
-     * 读取带 4 字节 Little-Endian 长度前缀的 Protobuf 报文
-     */
     private fun receivePacket(input: DataInputStream): PairingPacket {
-        val lenBytes = ByteArray(4)
-        input.readFully(lenBytes)
-
-        val len = ByteBuffer.wrap(lenBytes)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .int
-
+        // AOSP pairing_channel.cpp 中使用 ntohl -> 大端序（Big-Endian）
+        val len = input.readInt()
         require(len in 1..65536) { "Invalid packet length received: $len" }
-        
         val buf = ByteArray(len)
         input.readFully(buf)
-        return protoBuf.decodeFromByteArray(buf)
+        return AdbProtoUtils.decodePairingPacket(buf)
     }
 
     companion object {

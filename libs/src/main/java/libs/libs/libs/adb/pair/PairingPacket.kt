@@ -1,14 +1,8 @@
 package libs.libs.libs.adb.pair
 
-import kotlinx.serialization.ExperimentalSerializationApi
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.protobuf.ProtoNumber
-
-@OptIn(ExperimentalSerializationApi::class)
-@Serializable
 public data class PairingPacket(
-    @ProtoNumber(1) val type: Int = Type.UNKNOWN,
-    @ProtoNumber(2) val payload: ByteArray = byteArrayOf()
+    val type: Int = Type.UNKNOWN,
+    val payload: ByteArray = byteArrayOf()
 ) {
     public object Type {
         public const val UNKNOWN: Int = 0
