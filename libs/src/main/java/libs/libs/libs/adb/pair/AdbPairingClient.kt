@@ -149,37 +149,49 @@ public class AdbPairingClient(
         }
     }
 
-    /**
-     * 写入带 4 字节 Little-Endian 长度标头的 PairingPacket 报文
-     */
-    private fun sendPacket(out: DataOutputStream, packet: PairingPacket) {
-        val bytes = AdbProtoUtils.encodePairingPacket(packet)
-        val lenBytes = ByteBuffer.allocate(4)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .putInt(bytes.size)
-            .array()
+    // 发送数据包：增加 4 字节 Big-Endian 长度头
+    fun sendPacket(outputStream: OutputStream, packet: PairingPacket) {
+        val protobufBytes = encodePairingPacket(packet)
+        val length = protobufBytes.size
 
-        out.write(lenBytes)
-        out.write(bytes)
-        out.flush()
+        val header = byteArrayOf(
+            (length ushr 24 and 0xFF).toByte(),
+            (length ushr 16 and 0xFF).toByte(),
+            (length ushr 8 and 0xFF).toByte(),
+            (length and 0xFF).toByte()
+        )
+
+        outputStream.write(header)
+        outputStream.write(protobufBytes)
+        outputStream.flush()
     }
+    
+    // 接收数据包：先读 4 字节长度头，再读取完整 Protobuf 报文
+    fun receivePacket(inputStream: InputStream): PairingPacket {
+        val header = ByteArray(4)
+        readFully(inputStream, header)
 
-    /**
-     * 读取带 4 字节 Little-Endian 长度标头的 PairingPacket 报文
-     */
-    private fun receivePacket(input: DataInputStream): PairingPacket {
-        val lenBytes = ByteArray(4)
-        input.readFully(lenBytes)
+        val length = ((header[0].toInt() and 0xFF) shl 24) or
+                     ((header[1].toInt() and 0xFF) shl 16) or
+                     ((header[2].toInt() and 0xFF) shl 8) or
+                     (header[3].toInt() and 0xFF)
+    
+        if (length <= 0 || length > 65536) {
+            throw IOException("收到异常的报文长度帧: $length")
+        }
 
-        val len = ByteBuffer.wrap(lenBytes)
-            .order(ByteOrder.LITTLE_ENDIAN)
-            .int
-
-        require(len in 1..65536) { "Invalid packet length received: $len" }
-
-        val buf = ByteArray(len)
-        input.readFully(buf)
-        return AdbProtoUtils.decodePairingPacket(buf)
+        val payload = ByteArray(length)
+        readFully(inputStream, payload)
+        return decodePairingPacket(payload)
+    }
+    
+    private fun readFully(inputStream: InputStream, buffer: ByteArray) {
+        var offset = 0
+        while (offset < buffer.size) {
+            val count = inputStream.read(buffer, offset, buffer.size - offset)
+            if (count == -1) throw EOFException("手机端主动关闭了 Socket 连接")
+            offset += count
+        }
     }
 
     companion object {
