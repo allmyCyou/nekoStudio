@@ -40,9 +40,9 @@ class AdbSpake2Engine(
     private enum class State { INIT, MSG_GENERATED, KEY_GENERATED }
 
     companion object {
-        // 严格对齐 BoringSSL / AOSP 官方 spake2.c 的 32 字节 Ed25519 基点 M, N 与 群阶 Group Order
-        private val M_POINT_ENCODED = hexToBytes("d75a7e4bf6ddd9adb6626d32131c6b5c51a1e347a3478f53cfcf441b88eed12e")
-        private val N_POINT_ENCODED = hexToBytes("d4fe4800ce6117e1b41d4c8d21a322103dbddcbd06af680d71329a11693bc778")
+        // AOSP / BoringSSL 官方 spake2.c 标准 Ed25519 基点 M、N 与 群阶 Group Order
+        private val M_POINT_ENCODED = hexToBytes("5ada7e4bf6ddd9adb6626d32131c6b5c51a1e347a3478f53cfcf441b88eed12e")
+        private val N_POINT_ENCODED = hexToBytes("10e3df0ae37d8e7a99b5fe74b44672103dbddcbd06af680d71329a11693bc778")
         private val GROUP_ORDER     = hexToBytes("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")
 
         private val LIB_M: EdwardsPoint
@@ -50,35 +50,19 @@ class AdbSpake2Engine(
 
         init {
             try {
-                require(M_POINT_ENCODED.size == 32) { "M point length must be 32 bytes" }
-                require(N_POINT_ENCODED.size == 32) { "N point length must be 32 bytes" }
-
-                LIB_M = try {
-                    CompressedEdwardsY(M_POINT_ENCODED).decompress()
-                } catch (e: Exception) {
-                    throw IllegalArgumentException("Decompressing M_POINT failed", e)
-                }
-
-                LIB_N = try {
-                    CompressedEdwardsY(N_POINT_ENCODED).decompress()
-                } catch (e: Exception) {
-                    throw IllegalArgumentException("Decompressing N_POINT failed", e)
-                }
-            } catch (e: Throwable) {
-                e.printStackTrace()
+                LIB_M = CompressedEdwardsY(M_POINT_ENCODED).decompress()
+                LIB_N = CompressedEdwardsY(N_POINT_ENCODED).decompress()
+            } catch (e: Exception) {
                 throw ExceptionInInitializerError("AdbSpake2Engine static init failed: ${e.message}")
             }
         }
 
         private fun hexToBytes(hex: String): ByteArray {
-            val cleanHex = hex.replace(" ", "").trim()
-            require(cleanHex.length % 2 == 0) { "Hex string length must be even" }
-            val len = cleanHex.length
+            val len = hex.length
             val out = ByteArray(len / 2)
             for (i in 0 until len step 2) {
-                val hi = Character.digit(cleanHex[i], 16)
-                val lo = Character.digit(cleanHex[i + 1], 16)
-                require(hi != -1 && lo != -1) { "Invalid hex character at index $i" }
+                val hi = Character.digit(hex[i], 16)
+                val lo = Character.digit(hex[i + 1], 16)
                 out[i / 2] = ((hi shl 4) or lo).toByte()
             }
             return out
