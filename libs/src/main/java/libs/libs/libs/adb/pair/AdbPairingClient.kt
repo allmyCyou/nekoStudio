@@ -143,22 +143,43 @@ public class AdbPairingClient(
         }
     }
 
+    @OptIn(ExperimentalSerializationApi::class)
+    private val protoBuf = ProtoBuf {
+        // 关键：强制序列化默认值，避免 Protobuf 字段缺失导致 Parse 报错
+        encodeDefaults = true 
+    }
+
+    /**
+     * 写入带 4 字节 Little-Endian 长度前缀的 Protobuf 报文
+     */
     private fun sendPacket(out: DataOutputStream, packet: PairingPacket) {
-        val bytes = ProtoBuf.encodeToByteArray(packet)
-        // AOSP 使用 htonl，对应 Java 标准 Big-Endian writeInt
-        out.writeInt(bytes.size)
+        val bytes = protoBuf.encodeToByteArray(packet)
+        val lenBytes = ByteBuffer.allocate(4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(bytes.size)
+            .array()
+
+        out.write(lenBytes)
         out.write(bytes)
         out.flush()
     }
-    
-    private fun receivePacket(input: DataInputStream): PairingPacket {
-        // AOSP 使用 ntohl，对应 Java 标准 Big-Endian readInt
-        val len = input.readInt()
-        require(len in 1..65536) { "Invalid packet length received: $len" }
 
+    /**
+     * 读取带 4 字节 Little-Endian 长度前缀的 Protobuf 报文
+     */
+    private fun receivePacket(input: DataInputStream): PairingPacket {
+        val lenBytes = ByteArray(4)
+        input.readFully(lenBytes)
+
+        val len = ByteBuffer.wrap(lenBytes)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .int
+
+        require(len in 1..65536) { "Invalid packet length received: $len" }
+        
         val buf = ByteArray(len)
         input.readFully(buf)
-        return ProtoBuf.decodeFromByteArray(buf)
+        return protoBuf.decodeFromByteArray(buf)
     }
 
     companion object {
