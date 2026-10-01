@@ -6,6 +6,7 @@ import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.tls.AdbTlsCertificate
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
@@ -94,7 +95,7 @@ public class AdbPairingClient(
 
                     // 💡 增加对 Server Hello Payload 长度的针对性判断
                     if (serverPacket.payload.isEmpty()) {
-                        throw IOException("配对失败：手机端拒绝了 Client Hello (返回空数据)。请确认配对码是否正确、配对弹窗是否处于打开状态。")
+                        throw IOException("手机端拒绝了 Client Hello (返回空数据)")
                     }
 
                     require(serverPacket.payload.size == 32) {
