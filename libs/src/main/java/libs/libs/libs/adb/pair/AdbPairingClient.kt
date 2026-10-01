@@ -10,6 +10,8 @@ import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.tls.AdbTlsCertificate
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.KeyStore
@@ -141,16 +143,36 @@ public class AdbPairingClient(
         }
     }
 
+    /**
+     * 写入带 4 字节 Little-Endian 长度前缀的 Protobuf 报文
+     */
     private fun sendPacket(out: DataOutputStream, packet: PairingPacket) {
         val bytes = ProtoBuf.encodeToByteArray(packet)
-        out.writeInt(bytes.size)
+        // 使用 ByteBuffer 显式指定 LITTLE_ENDIAN
+        val lenBytes = ByteBuffer.allocate(4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(bytes.size)
+            .array()
+
+        out.write(lenBytes)
         out.write(bytes)
         out.flush()
     }
 
+    /**
+     * 读取带 4 字节 Little-Endian 长度前缀的 Protobuf 报文
+     */
     private fun receivePacket(input: DataInputStream): PairingPacket {
-        val len = input.readInt()
+        val lenBytes = ByteArray(4)
+        input.readFully(lenBytes)
+
+        // 使用 ByteBuffer 按照 LITTLE_ENDIAN 解析长度
+        val len = ByteBuffer.wrap(lenBytes)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .int
+
         require(len in 1..65536) { "Invalid packet length received: $len" }
+
         val buf = ByteArray(len)
         input.readFully(buf)
         return ProtoBuf.decodeFromByteArray(buf)
