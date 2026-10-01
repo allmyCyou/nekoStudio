@@ -8,6 +8,8 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -42,6 +44,7 @@ public class AdbPairingClient(
                 rawSocket.tcpNoDelay = true
                 rawSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
 
+                // 1. 生成 TLS 自签名证书与客户端凭证
                 val keyPair = keyManager.getKeyPair()
                 val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
 
@@ -73,7 +76,7 @@ public class AdbPairingClient(
                     val inputStream = DataInputStream(tlsSocket.inputStream)
                     val outputStream = DataOutputStream(tlsSocket.outputStream)
 
-                    // 1. 发送 Client Hello
+                    // 2. 发送 Client Hello (SPAKE2 阶段 1)
                     val rawClientHello = spake2Engine.generateClientHello()
                     val clientPacket = PairingPacket(
                         type = PairingPacket.Type.SPAKE2_MSG,
@@ -81,14 +84,14 @@ public class AdbPairingClient(
                     )
                     sendPacket(outputStream, clientPacket)
 
-                    // 2. 接收 Server Hello
+                    // 3. 接收 Server Hello (SPAKE2 阶段 2)
                     val serverPacket = receivePacket(inputStream)
                     require(serverPacket.type == PairingPacket.Type.SPAKE2_MSG) {
                         "Expected SPAKE2_MSG packet type, got: ${serverPacket.type}"
                     }
                     spake2Engine.processServerHelloAndDeriveKey(serverPacket.payload)
 
-                    // 3. 构建 PeerInfo 并加密发送
+                    // 4. 发送 PeerInfo 客户端公钥 (SPAKE2 加密)
                     val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
                     val clientPeerInfo = PeerInfo(
                         status = PeerInfo.Status.OK,
@@ -103,7 +106,7 @@ public class AdbPairingClient(
                     )
                     sendPacket(outputStream, infoPacket)
 
-                    // 4. 接收对端 PeerInfo 响应
+                    // 5. 接收对端 PeerInfo 响应
                     val responsePacket = receivePacket(inputStream)
                     require(responsePacket.type == PairingPacket.Type.PEER_INFO) {
                         "Expected PEER_INFO packet type, got: ${responsePacket.type}"
@@ -133,18 +136,34 @@ public class AdbPairingClient(
         }
     }
 
+    /**
+     * 写入带 4 字节 Little-Endian 长度标头的 PairingPacket 报文
+     */
     private fun sendPacket(out: DataOutputStream, packet: PairingPacket) {
         val bytes = AdbProtoUtils.encodePairingPacket(packet)
-        // AOSP pairing_channel.cpp 中使用 htonl -> 大端序（Big-Endian）
-        out.writeInt(bytes.size)
+        val lenBytes = ByteBuffer.allocate(4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(bytes.size)
+            .array()
+
+        out.write(lenBytes)
         out.write(bytes)
         out.flush()
     }
 
+    /**
+     * 读取带 4 字节 Little-Endian 长度标头的 PairingPacket 报文
+     */
     private fun receivePacket(input: DataInputStream): PairingPacket {
-        // AOSP pairing_channel.cpp 中使用 ntohl -> 大端序（Big-Endian）
-        val len = input.readInt()
+        val lenBytes = ByteArray(4)
+        input.readFully(lenBytes)
+
+        val len = ByteBuffer.wrap(lenBytes)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .int
+
         require(len in 1..65536) { "Invalid packet length received: $len" }
+
         val buf = ByteArray(len)
         input.readFully(buf)
         return AdbProtoUtils.decodePairingPacket(buf)
