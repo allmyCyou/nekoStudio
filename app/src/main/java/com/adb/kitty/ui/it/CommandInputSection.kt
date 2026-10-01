@@ -24,7 +24,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
@@ -35,18 +37,15 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.roundToIntRect
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
 @SuppressLint("ClickableViewAccessibility")
-@OptIn(ExperimentalMaterial3Api::class, FlowPreview::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun <T> CommandInputSection(
     query: TextFieldValue,
@@ -71,26 +70,58 @@ fun <T> CommandInputSection(
     val coroutineScope = rememberCoroutineScope()
     var focusInteraction by remember { mutableStateOf<FocusInteraction.Focus?>(null) }
 
-    val searchChannel = remember { Channel<String>(capacity = Channel.CONFLATED) }
-
-    LaunchedEffect(searchChannel) {
-        searchChannel.receiveAsFlow()
-            .debounce(150)
-            .collect { latestText ->
-                onExpandedChange(latestText.isNotEmpty())
-            }
+    // 当输入框内容发生变化时，根据内容是否为空自动同步展开状态，避免 Channel 防抖引发的延迟竞态
+    LaunchedEffect(query.text) {
+        if (query.text.isNotEmpty() && !expanded) {
+            onExpandedChange(true)
+        } else if (query.text.isEmpty() && expanded) {
+            onExpandedChange(false)
+        }
     }
 
     val displayItems = remember(filteredItems) { filteredItems.take(20) }
 
-    // 记录输入框外层容器的宽度，以便 Dropdown 宽度精确对齐
+    // 记录输入框在窗口中的坐标与尺寸
     var textFieldSize by remember { mutableStateOf(IntSize.Zero) }
+    var anchorBoundsInWindow by remember { mutableStateOf(IntRect.Zero) }
+
     val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
+    val screenHeightDp = configuration.screenHeightDp.dp
+
+    // 纯 remember 计算最大高度：根据输入框底边在屏幕上的实际像素位置推算，绝不在 calculatePosition 阶段触发副作用
+    val maxMenuHeightDp = remember(anchorBoundsInWindow, screenHeightDp, density) {
+        if (anchorBoundsInWindow == IntRect.Zero) 200.dp
+        else {
+            val anchorBottomDp = with(density) { anchorBoundsInWindow.bottom.toDp() }
+            (screenHeightDp - anchorBottomDp - 16.dp).coerceAtLeast(80.dp)
+        }
+    }
+
+    // 无副作用的位置定位器
+    val customPositionProvider = remember {
+        object : PopupPositionProvider {
+            override fun calculatePosition(
+                anchorBounds: IntRect,
+                windowSize: IntSize,
+                layoutDirection: LayoutDirection,
+                popupContentSize: IntSize
+            ): IntOffset {
+                return IntOffset(
+                    x = anchorBounds.left,
+                    y = anchorBounds.bottom
+                )
+            }
+        }
+    }
 
     Box(
         modifier = modifier
             .wrapContentHeight()
-            .onSizeChanged { textFieldSize = it }
+            .onGloballyPositioned { coordinates ->
+                textFieldSize = coordinates.size
+                anchorBoundsInWindow = coordinates.boundsInWindow().roundToIntRect()
+            }
     ) {
         OutlinedTextFieldDefaults.DecorationBox(
             value = query.text,
@@ -167,7 +198,6 @@ fun <T> CommandInputSection(
                                             selection = TextRange(safeStart, safeEnd)
                                         )
                                     )
-                                    searchChannel.trySend(newText)
                                 }
 
                                 override fun afterTextChanged(s: Editable?) {
@@ -214,38 +244,15 @@ fun <T> CommandInputSection(
             contentPadding = OutlinedTextFieldDefaults.contentPaddingWithLabel()
         )
 
-        // 自定义下拉菜单：严格锁定在输入框底部，绝不上移/覆盖
+        // 下拉菜单：锁定在输入框底部
         if (expanded && query.text.isNotEmpty() && displayItems.isNotEmpty()) {
-            var maxMenuHeightDp by remember { mutableStateOf(200.dp) }
-
-            val customPositionProvider = remember(density) {
-                object : PopupPositionProvider {
-                    override fun calculatePosition(
-                        anchorBounds: IntRect,
-                        windowSize: IntSize,
-                        layoutDirection: LayoutDirection,
-                        popupContentSize: IntSize
-                    ): IntOffset {
-                        // 算出输入框底部到小窗底部剩余的像素高度
-                        val availableHeightPx = (windowSize.height - anchorBounds.bottom - 16).coerceAtLeast(80)
-                        val calculatedDp = with(density) { availableHeightPx.toDp() }
-                        if (maxMenuHeightDp != calculatedDp) {
-                            maxMenuHeightDp = calculatedDp
-                        }
-
-                        // 强行指定 Top 坐标等于 anchorBounds.bottom（绝对不向上覆盖）
-                        return IntOffset(
-                            x = anchorBounds.left,
-                            y = anchorBounds.bottom
-                        )
-                    }
-                }
-            }
-
             Popup(
                 popupPositionProvider = customPositionProvider,
                 onDismissRequest = { onExpandedChange(false) },
-                properties = PopupProperties(focusable = false) // focusable = false 避免焦点抢占导致的软键盘关闭/打字卡顿
+                properties = PopupProperties(
+                    focusable = false,
+                    dismissOnClickOutside = false // 禁用外部点击自动关闭，避免打字或点击 EditText 时菜单闪烁关闭
+                )
             ) {
                 Surface(
                     modifier = Modifier
@@ -259,7 +266,10 @@ fun <T> CommandInputSection(
                     LazyColumn(
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        items(displayItems) { item ->
+                        items(
+                            items = displayItems,
+                            key = { item -> getItemCommand(item) } // 绑定 key 优化节点复用，避免每次重新构建
+                        ) { item ->
                             val command = getItemCommand(item)
                             val description = getItemDescription(item)
                             val isApp = isAppItem(item)
