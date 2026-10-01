@@ -26,9 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -71,7 +70,7 @@ fun <T> CommandInputSection(
     val coroutineScope = rememberCoroutineScope()
     var focusInteraction by remember { mutableStateOf<FocusInteraction.Focus?>(null) }
 
-    // 当输入框内容发生变化时，根据内容是否为空自动同步展开状态，避免 Channel 防抖引发的延迟竞态
+    // 当输入框内容发生变化时，根据内容是否为空自动同步展开状态
     LaunchedEffect(query.text) {
         if (query.text.isNotEmpty() && !expanded) {
             onExpandedChange(true)
@@ -86,21 +85,31 @@ fun <T> CommandInputSection(
     var textFieldSize by remember { mutableStateOf(IntSize.Zero) }
     var anchorBoundsInWindow by remember { mutableStateOf(IntRect.Zero) }
 
+    val view = LocalView.current
     val density = LocalDensity.current
-    val windowInfo = LocalWindowInfo.current
 
-    val maxMenuHeightDp = remember(anchorBoundsInWindow, windowInfo.containerSize, density) {
-        if (anchorBoundsInWindow == IntRect.Zero) 200.dp
-        else {
-            val containerHeightPx = windowInfo.containerSize.height
-            val availablePx = (containerHeightPx - anchorBoundsInWindow.bottom).coerceAtLeast(0)
+    // 实时监听软键盘 (ime) 和 底部导航栏 (navigationBars) 的高度
+    val imeBottom = WindowInsets.ime.getBottom(density)
+    val navBottom = WindowInsets.navigationBars.getBottom(density)
+    val bottomInset = maxOf(imeBottom, navBottom)
+
+    // 精确计算“输入框底部”到“软键盘顶部”之间的可用高度
+    val maxMenuHeightDp = remember(anchorBoundsInWindow, view.height, bottomInset, density) {
+        if (anchorBoundsInWindow == IntRect.Zero) {
+            200.dp
+        } else {
+            // 软键盘顶部的物理像素 Y 坐标
+            val visibleBottomPx = view.height - bottomInset
+            // 计算可放置菜单的像素高度
+            val availablePx = (visibleBottomPx - anchorBoundsInWindow.bottom).coerceAtLeast(0)
+
             with(density) {
-                (availablePx.toDp() - 16.dp).coerceAtLeast(80.dp)
+                availablePx.toDp()
             }
         }
     }
 
-    // 无副作用的位置定位器
+    // 锁定在输入框正下方的 Popup 位置定位器
     val customPositionProvider = remember {
         object : PopupPositionProvider {
             override fun calculatePosition(
@@ -246,14 +255,14 @@ fun <T> CommandInputSection(
             contentPadding = OutlinedTextFieldDefaults.contentPaddingWithLabel()
         )
 
-        // 下拉菜单：锁定在输入框底部
-        if (expanded && query.text.isNotEmpty() && displayItems.isNotEmpty()) {
+        // 下拉菜单：高度动态自适应，限制在输入框底部与软键盘顶部之间
+        if (expanded && query.text.isNotEmpty() && displayItems.isNotEmpty() && maxMenuHeightDp > 10.dp) {
             Popup(
                 popupPositionProvider = customPositionProvider,
                 onDismissRequest = { onExpandedChange(false) },
                 properties = PopupProperties(
                     focusable = false,
-                    dismissOnClickOutside = false // 禁用外部点击自动关闭，避免打字或点击 EditText 时菜单闪烁关闭
+                    dismissOnClickOutside = false
                 )
             ) {
                 Surface(
@@ -270,7 +279,7 @@ fun <T> CommandInputSection(
                     ) {
                         items(
                             items = displayItems,
-                            key = { item -> getItemCommand(item) } // 绑定 key 优化节点复用，避免每次重新构建
+                            key = { item -> getItemCommand(item) }
                         ) { item ->
                             val command = getItemCommand(item)
                             val description = getItemDescription(item)
