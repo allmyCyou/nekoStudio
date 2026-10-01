@@ -7,8 +7,8 @@ import kotlinx.serialization.protobuf.ProtoNumber
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
 public data class PairingPacket(
-    @ProtoNumber(1) val type: Int,
-    @ProtoNumber(2) val payload: ByteArray
+    @ProtoNumber(1) val type: Int = Type.UNKNOWN,
+    @ProtoNumber(2) val payload: ByteArray = byteArrayOf()
 ) {
     public object Type {
         public const val UNKNOWN: Int = 0
