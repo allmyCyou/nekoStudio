@@ -104,7 +104,7 @@ public class AdbPairingClient(
                         status = PeerInfo.Status.OK,
                         pubKey = pubKeyBytes
                     )
-                    val serializedPeerInfo = ProtoBuf.encodeToByteArray(clientPeerInfo)
+                    val serializedPeerInfo = protoBuf.encodeToByteArray(clientPeerInfo)
                     val encryptedPeerInfo = spake2Engine.encryptPayload(serializedPeerInfo)
 
                     val infoPacket = PairingPacket(
@@ -120,7 +120,7 @@ public class AdbPairingClient(
                     }
 
                     val decryptedResponse = spake2Engine.decryptPayload(responsePacket.payload)
-                    val serverPeerInfo = ProtoBuf.decodeFromByteArray<PeerInfo>(decryptedResponse)
+                    val serverPeerInfo = protoBuf.decodeFromByteArray<PeerInfo>(decryptedResponse)
 
                     if (serverPeerInfo.status == PeerInfo.Status.OK) {
                         val peerPubKey = if (serverPeerInfo.pubKey.isNotEmpty()) {
