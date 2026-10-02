@@ -661,6 +661,14 @@ class MainActivity : ComponentActivity() {
         if (cmd.isEmpty()) return
     
         when {
+            cmd.startsWith("msg-name") -> {
+                appendLog("[INFO] Msg >> $cmd")
+                val msgCmd = cmd.removePrefix("msg-name ").trim()
+                if (msgCmd.isNotEmpty()) {
+                    updateConsoleTitle(msgCmd)
+                }
+            }
+
             cmd.startsWith("adb ") -> {
                 appendLog("[INFO] ADB >> $cmd")
                 val adbCmd = cmd.removePrefix("adb ").trim()
@@ -746,6 +754,16 @@ class MainActivity : ComponentActivity() {
 
             else -> handlePhysicalFallback(cmd)
         }
+    }
+
+    private fun updateConsoleTitle(newTitle: String) {
+        // 1. 持久化保存到 SharedPreferences
+        val prefs = applicationContext.getSharedPreferences("msg_name_title", Context.MODE_PRIVATE)
+        prefs.edit().putString("key_name_title", newTitle).apply()
+
+        reloadServiceAvatar()
+ 
+        appendLog("[INFO] Updated console title to: $newTitle")
     }
 
     private fun handleAdbCommand(adbCmd: String) {

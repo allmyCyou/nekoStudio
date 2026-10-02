@@ -348,12 +348,18 @@ class AdbSessionService : Service() {
     private val anonymousSender: Person by lazy {
         Person.Builder().setName("").build()
     }
+    private fun getServiceTitle(): String {
+        val prefs = application.getSharedPreferences("msg_name_title", Context.MODE_PRIVATE)
+        // 如果获取到的 SP 值为 null 或空白字符，则回退使用默认的 R.string
+        return prefs.getString("key_name_title", null)?.takeIf { it.isNotBlank() }
+            ?: getString(R.string.action_service_aaa)
+    }
 
     private fun getConsoleUser(): Person {
         var user = cachedConsoleUser
         if (user == null) {
             user = Person.Builder()
-                .setName(getString(R.string.action_service_aaa))
+                .setName(getServiceTitle())
                 .setIcon(getCircularIcon())
                 .setKey(PERSON_KEY)
                 .build()
@@ -478,7 +484,7 @@ class AdbSessionService : Service() {
         }
 
         val shortcut = ShortcutInfoCompat.Builder(this, SHORTCUT_ID)
-            .setShortLabel(getString(R.string.action_service_aaa))
+            .setShortLabel(getServiceTitle())
             .setIcon(getCircularIcon())
             .setIntent(newIntent)
             .setPerson(getConsoleUser())
