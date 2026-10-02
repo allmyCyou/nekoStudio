@@ -30,11 +30,13 @@ public object AdbProtoUtils {
     public fun decodePairingPacket(bytes: ByteArray): PairingPacket {
         if (bytes.isEmpty()) return PairingPacket()
         val input = ByteArrayInputStream(bytes)
-        var type = PairingPacket.Type.SPAKE2_MSG 
+        var type = PairingPacket.Type.UNKNOWN 
         var payload = byteArrayOf()
 
         while (input.available() > 0) {
             val tag = readVarint32(input)
+            if (tag == 0) break
+
             val fieldNumber = tag ushr 3
             val wireType = tag and 0x07
 
@@ -82,6 +84,8 @@ public object AdbProtoUtils {
 
         while (input.available() > 0) {
             val tag = readVarint32(input)
+            if (tag == 0) break
+ 
             val fieldNumber = tag ushr 3
             val wireType = tag and 0x07
 
