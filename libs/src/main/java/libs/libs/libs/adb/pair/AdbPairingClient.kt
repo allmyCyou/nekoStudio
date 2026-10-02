@@ -70,6 +70,7 @@ public class AdbPairingClient(
                     true
                 ) as SSLSocket
 
+                sslSocket.useClientMode = true
                 sslSocket.enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
 
                 sslSocket.use { tlsSocket ->
@@ -94,7 +95,7 @@ public class AdbPairingClient(
                     }
 
                     if (serverPacket.payload.isEmpty()) {
-                        throw IOException("手机端拒绝了 Client Hello (返回空数据)")
+                        throw IOException("手机端返回了空 Payload (配对码错误或已被拒绝)")
                     }
 
                     require(serverPacket.payload.size == 32) {
