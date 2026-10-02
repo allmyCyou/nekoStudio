@@ -28,27 +28,26 @@ public class AdbSpake2Engine(
     private val myMsg = ByteArray(32)
     private var derivedSessionKey: ByteArray? = null
 
-    // AES-GCM IV 计数器 (64位 Little-Endian)
     private var encIv: Long = 0L
     private var decIv: Long = 0L
 
     public fun generateClientHello(): ByteArray {
-        // 1. 生成 64 字节随机数并对 Group Order L 取模做 sc_reduce
+        // 1. 生成 64 字节随机数做 sc_reduce
         val randomBytes = ByteArray(64)
         random.nextBytes(randomBytes)
         scReduce(randomBytes, scalarX)
         Arrays.fill(randomBytes, 0.toByte())
 
-        // 2. 对 passwordBytes 做 SHA-512 并对 64 字节结果做 sc_reduce
+        // 2. 对 password 做 SHA-512 并做 sc_reduce
         val md = MessageDigest.getInstance("SHA-512")
         val pHash = md.digest(passwordBytes)
         scReduce(pHash, scalarW)
         Arrays.fill(pHash, 0.toByte())
 
-        // 3. 计算 Client Hello: T = x*G + w*M
+        // 3. 计算 T = x*G + w*M
         val xG = scalarMultBase(scalarX)
         val wM = scalarMult(scalarW, M_POINT_BYTES)
-        
+
         val pointT = pointAdd(xG, wM)
         System.arraycopy(pointT, 0, myMsg, 0, 32)
 
@@ -60,15 +59,15 @@ public class AdbSpake2Engine(
 
         val peerMsg = serverHello.clone()
 
-        // 1. 计算 S = Y - w*N = Y + (-w)*N
+        // 1. S = Y - w*N = Y + (-w)*N
         val wN = scalarMult(scalarW, N_POINT_BYTES)
         val minusWN = pointNegate(wN)
         val pointS = pointAdd(peerMsg, minusWN)
 
-        // 2. 计算共享密钥 K = x * S
+        // 2. 共享点 K = x * S
         val pointK = scalarMult(scalarX, pointS)
 
-        // 3. 计算 AOSP SPAKE2 Master Key
+        // 3. 计算 Master Key
         val md = MessageDigest.getInstance("SHA-512")
         updateWithLengthPrefix(md, myNameBytes)
         updateWithLengthPrefix(md, theirNameBytes)
@@ -79,7 +78,7 @@ public class AdbSpake2Engine(
 
         val masterKey = md.digest()
 
-        // 4. 使用 HKDF-SHA256 衍生 16 字节 AES-128-GCM 密钥
+        // 4. HKDF-SHA256 衍生 key
         val hkdf = HKDFBytesGenerator(SHA256Digest())
         hkdf.init(HKDFParameters(masterKey, null, HKDF_INFO))
         val secretKey = ByteArray(16)
@@ -87,7 +86,6 @@ public class AdbSpake2Engine(
 
         this.derivedSessionKey = secretKey
 
-        // 清理敏感数据
         Arrays.fill(masterKey, 0.toByte())
         Arrays.fill(pointK, 0.toByte())
     }
@@ -117,10 +115,10 @@ public class AdbSpake2Engine(
         Arrays.fill(myMsg, 0.toByte())
     }
 
-    // --- 算法辅助计算（基于纯 BigInteger 域运算，摆脱 BouncyCastle 依赖） ---
+    // --- 底层 LE 字节序 & 曲线点运算 ---
 
-    private fun scReduce(input: ByteArray, out32: ByteArray) {
-        val bigInt = BigInteger(1, input.reversedArray())
+    private fun scReduce(input64: ByteArray, out32: ByteArray) {
+        val bigInt = BigInteger(1, input64.reversedArray())
         val reduced = bigInt.mod(ED25519_L)
         val leBytes = reduced.toByteArray().reversedArray()
 
@@ -134,7 +132,6 @@ public class AdbSpake2Engine(
     }
 
     private fun scalarMult(scalar: ByteArray, pointBytes: ByteArray): ByteArray {
-        // 使用绝对类型安全的 Curve25519 标量乘法实现
         val k = BigInteger(1, scalar.reversedArray())
         val p = parseCurvePoint(pointBytes)
         val result = p.multiply(k)
@@ -164,11 +161,13 @@ public class AdbSpake2Engine(
         md.update(data)
     }
 
-    // --- Ed25519 曲线坐标解析与编码 ---
-
     private fun parseCurvePoint(bytes: ByteArray): SimpleECPoint {
-        val y = BigInteger(1, bytes.reversedArray()).clearBit(255)
-        val x = recoverX(y)
+        val copy = bytes.clone()
+        val xBit = (copy[31].toInt() and 0x80) != 0
+        copy[31] = (copy[31].toInt() and 0x7F).toByte()
+        
+        val y = BigInteger(1, copy.reversedArray())
+        val x = recoverX(y, xBit)
         return SimpleECPoint(x, y)
     }
 
@@ -183,8 +182,7 @@ public class AdbSpake2Engine(
         return result
     }
 
-    private fun recoverX(y: BigInteger): BigInteger {
-        // x^2 = (y^2 - 1) / (d * y^2 + 1) mod P
+    private fun recoverX(y: BigInteger, xBit: Boolean): BigInteger {
         val y2 = y.multiply(y).mod(P)
         val num = y2.subtract(BigInteger.ONE).mod(P)
         val den = D.multiply(y2).add(BigInteger.ONE).mod(P)
@@ -193,12 +191,14 @@ public class AdbSpake2Engine(
         if (x.multiply(x).subtract(num.multiply(den.modInverse(P))).mod(P) != BigInteger.ZERO) {
             x = x.multiply(I).mod(P)
         }
+        if (x.testBit(0) != xBit) {
+            x = P.subtract(x)
+        }
         return x
     }
 
     private inner class SimpleECPoint(val x: BigInteger, val y: BigInteger) {
         fun add(other: SimpleECPoint): SimpleECPoint {
-            // Twisted Edwards 曲线点加法公式
             val x1x2 = x.multiply(other.x).mod(P)
             val y1y2 = y.multiply(other.y).mod(P)
             val dx1x2y1y2 = D.multiply(x1x2).multiply(y1y2).mod(P)
@@ -230,7 +230,10 @@ public class AdbSpake2Engine(
         private val D = BigInteger("-121665", 10).multiply(BigInteger("121666", 10).modInverse(P)).mod(P)
         private val I = BigInteger("2", 10).modPow(P.subtract(BigInteger.ONE).divide(BigInteger.valueOf(4)), P)
 
-        private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666666")
+        // 正确的 Ed25519 Base Point (Little-Endian Encoded)
+        private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666658")
+        
+        // AOSP 精确的 M 与 N 坐标点 Hex
         private val M_POINT_BYTES = hexToBytes("d75a980182b10ab7d54377c1139e3a706c4d24fe0c1d0b348e8ad8780b22c8d4")
         private val N_POINT_BYTES = hexToBytes("015708e23d49d748e129620a7195adb078a13f575d59a7622cd0146505c54383")
 

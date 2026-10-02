@@ -13,9 +13,6 @@
 -keep class org.bouncycastle.** { *; }
 -dontwarn org.bouncycastle.**
 
--keep class cafe.cryptography.** { *; }
--dontwarn cafe.cryptography.**
-
 -keep class okio.** { *; }
 -dontwarn okio.**
 

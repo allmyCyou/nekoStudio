@@ -78,6 +78,4 @@ dependencies {
     implementation(libs.androidx.annotation.experimental)
     implementation(libs.bcprov.jdk18on)
     implementation(libs.bcpkix.jdk18on)
-    implementation(libs.ed25519.elisabeth)
-    implementation(libs.curve25519.elisabeth)
 }
