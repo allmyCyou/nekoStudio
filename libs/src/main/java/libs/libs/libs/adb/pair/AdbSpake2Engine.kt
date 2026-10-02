@@ -1,10 +1,8 @@
 package libs.libs.libs.adb.pair
 
 import org.bouncycastle.crypto.digests.SHA256Digest
-import org.bouncycastle.crypto.digests.SHA512Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
 import org.bouncycastle.crypto.params.HKDFParameters
-import org.bouncycastle.math.ec.rfc8032.Ed25519
 import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -35,31 +33,24 @@ public class AdbSpake2Engine(
     private var decIv: Long = 0L
 
     public fun generateClientHello(): ByteArray {
-        // 1. 生成 64 字节随机数并做 Ed25519 标量规约 (sc_reduce) 得到 scalarX
+        // 1. 生成 64 字节随机数并对 Group Order L 取模做 sc_reduce
         val randomBytes = ByteArray(64)
         random.nextBytes(randomBytes)
         scReduce(randomBytes, scalarX)
         Arrays.fill(randomBytes, 0.toByte())
 
-        // 2. 对 passwordBytes 做 SHA-512 并对 64 字节结果做 sc_reduce 得到 scalarW
-        val sha512 = SHA512Digest()
-        val pHash = ByteArray(64)
-        sha512.update(passwordBytes, 0, passwordBytes.size)
-        sha512.doFinal(pHash, 0)
+        // 2. 对 passwordBytes 做 SHA-512 并对 64 字节结果做 sc_reduce
+        val md = MessageDigest.getInstance("SHA-512")
+        val pHash = md.digest(passwordBytes)
         scReduce(pHash, scalarW)
         Arrays.fill(pHash, 0.toByte())
 
         // 3. 计算 Client Hello: T = x*G + w*M
-        // 使用 BouncyCastle Ed25519 标量乘法与点加法
-        val xG = ByteArray(32)
-        val wM = ByteArray(32)
-        Ed25519.scalarMultBase(scalarX, 0, xG, 0)
+        val xG = scalarMultBase(scalarX)
+        val wM = scalarMult(scalarW, M_POINT_BYTES)
         
-        // 计算 w * M
-        scalarMult(scalarW, M_POINT_BYTES, wM)
-
-        // T = xG + wM
-        pointAdd(xG, wM, myMsg)
+        val pointT = pointAdd(xG, wM)
+        System.arraycopy(pointT, 0, myMsg, 0, 32)
 
         return myMsg.clone()
     }
@@ -70,21 +61,14 @@ public class AdbSpake2Engine(
         val peerMsg = serverHello.clone()
 
         // 1. 计算 S = Y - w*N = Y + (-w)*N
-        val wN = ByteArray(32)
-        scalarMult(scalarW, N_POINT_BYTES, wN)
-
+        val wN = scalarMult(scalarW, N_POINT_BYTES)
         val minusWN = pointNegate(wN)
-        val pointS = ByteArray(32)
-        pointAdd(peerMsg, minusWN, pointS)
+        val pointS = pointAdd(peerMsg, minusWN)
 
         // 2. 计算共享密钥 K = x * S
-        val pointK = ByteArray(32)
-        scalarMult(scalarX, pointS, pointK)
+        val pointK = scalarMult(scalarX, pointS)
 
         // 3. 计算 AOSP SPAKE2 Master Key
-        // MasterKey = SHA-512( LengthPrefix(MyName) + LengthPrefix(TheirName) +
-        //                      LengthPrefix(MyMsg) + LengthPrefix(ServerMsg) +
-        //                      LengthPrefix(K) + LengthPrefix(w) )
         val md = MessageDigest.getInstance("SHA-512")
         updateWithLengthPrefix(md, myNameBytes)
         updateWithLengthPrefix(md, theirNameBytes)
@@ -103,7 +87,7 @@ public class AdbSpake2Engine(
 
         this.derivedSessionKey = secretKey
 
-        // 清理敏感标量
+        // 清理敏感数据
         Arrays.fill(masterKey, 0.toByte())
         Arrays.fill(pointK, 0.toByte())
     }
@@ -133,44 +117,39 @@ public class AdbSpake2Engine(
         Arrays.fill(myMsg, 0.toByte())
     }
 
-    // --- Ed25519 / BoringSSL 底层工具辅助函数 ---
+    // --- 算法辅助计算（基于纯 BigInteger 域运算，摆脱 BouncyCastle 依赖） ---
 
-    /**
-     * 对应 BoringSSL curve25519_sc_reduce: 将 64 字节整数对 Group Order L 取模降维为 32 字节标量
-     */
-    private fun scReduce(input64: ByteArray, out32: ByteArray) {
-        val bigInt = BigInteger(1, input64.reversedArray())
+    private fun scReduce(input: ByteArray, out32: ByteArray) {
+        val bigInt = BigInteger(1, input.reversedArray())
         val reduced = bigInt.mod(ED25519_L)
         val leBytes = reduced.toByteArray().reversedArray()
-        
+
         Arrays.fill(out32, 0.toByte())
         val copyLen = minOf(leBytes.size, 32)
         System.arraycopy(leBytes, 0, out32, 0, copyLen)
     }
 
-    private fun scalarMult(scalar: ByteArray, point: ByteArray, out: ByteArray) {
-        // 调用 BouncyCastle Ed25519 标量点乘
-        Ed25519.scalarMult(scalar, 0, point, 0, out, 0)
+    private fun scalarMultBase(scalar: ByteArray): ByteArray {
+        return scalarMult(scalar, BASE_POINT_BYTES)
     }
 
-    private fun pointAdd(pointA: ByteArray, pointB: ByteArray, out: ByteArray) {
-        // 用 Ed25519 计算 点 A + 点 B
-        // 通过 1*A + 1*B 模拟点加
-        val pointResult = ByteArray(32)
-        // 使用 BC 原生 Point 算术
-        Ed25519.scalarMultBase(ONE_SCALAR, 0, pointResult, 0) // dummy init
-        // 简化表达：利用 BC Ed25519 编码转换与加法
-        // 如果你的 BC 版本没有暴露 Low-level Point Add，可使用标准 BigInt / Scalar 叠加
-        // 这里使用兼容方式实现 A + B:
-        val pA = parsePoint(pointA)
-        val pB = parsePoint(pointB)
+    private fun scalarMult(scalar: ByteArray, pointBytes: ByteArray): ByteArray {
+        // 使用绝对类型安全的 Curve25519 标量乘法实现
+        val k = BigInteger(1, scalar.reversedArray())
+        val p = parseCurvePoint(pointBytes)
+        val result = p.multiply(k)
+        return encodeCurvePoint(result)
+    }
+
+    private fun pointAdd(pointABytes: ByteArray, pointBBytes: ByteArray): ByteArray {
+        val pA = parseCurvePoint(pointABytes)
+        val pB = parseCurvePoint(pointBBytes)
         val pSum = pA.add(pB)
-        System.arraycopy(pSum.getEncoded(), 0, out, 0, 32)
+        return encodeCurvePoint(pSum)
     }
 
-    private fun pointNegate(point: ByteArray): ByteArray {
-        val res = point.clone()
-        // Ed25519 点的取反：翻转 X 坐标 (即第 31 字节最高位 Sign bit 异或 0x80)
+    private fun pointNegate(pointBytes: ByteArray): ByteArray {
+        val res = pointBytes.clone()
         res[31] = (res[31].toInt() xor 0x80).toByte()
         return res
     }
@@ -185,17 +164,73 @@ public class AdbSpake2Engine(
         md.update(data)
     }
 
-    // BC 兼容解包 point
-    private fun parsePoint(encoded: ByteArray): org.bouncycastle.math.ec.ECPoint {
-        val curve = org.bouncycastle.math.ec.custom.djb.Curve25519()
-        return curve.decodePoint(encoded)
+    // --- Ed25519 曲线坐标解析与编码 ---
+
+    private fun parseCurvePoint(bytes: ByteArray): SimpleECPoint {
+        val y = BigInteger(1, bytes.reversedArray()).clearBit(255)
+        val x = recoverX(y)
+        return SimpleECPoint(x, y)
+    }
+
+    private fun encodeCurvePoint(point: SimpleECPoint): ByteArray {
+        val yBytes = point.y.toByteArray().reversedArray()
+        val result = ByteArray(32)
+        val copyLen = minOf(yBytes.size, 32)
+        System.arraycopy(yBytes, 0, result, 0, copyLen)
+        if (point.x.testBit(0)) {
+            result[31] = (result[31].toInt() or 0x80).toByte()
+        }
+        return result
+    }
+
+    private fun recoverX(y: BigInteger): BigInteger {
+        // x^2 = (y^2 - 1) / (d * y^2 + 1) mod P
+        val y2 = y.multiply(y).mod(P)
+        val num = y2.subtract(BigInteger.ONE).mod(P)
+        val den = D.multiply(y2).add(BigInteger.ONE).mod(P)
+        var x = num.multiply(den.modInverse(P)).modPow(P.add(BigInteger.valueOf(3)).divide(BigInteger.valueOf(8)), P)
+
+        if (x.multiply(x).subtract(num.multiply(den.modInverse(P))).mod(P) != BigInteger.ZERO) {
+            x = x.multiply(I).mod(P)
+        }
+        return x
+    }
+
+    private inner class SimpleECPoint(val x: BigInteger, val y: BigInteger) {
+        fun add(other: SimpleECPoint): SimpleECPoint {
+            // Twisted Edwards 曲线点加法公式
+            val x1x2 = x.multiply(other.x).mod(P)
+            val y1y2 = y.multiply(other.y).mod(P)
+            val dx1x2y1y2 = D.multiply(x1x2).multiply(y1y2).mod(P)
+
+            val x3 = (x.multiply(other.y).add(y.multiply(other.x))).multiply(BigInteger.ONE.add(dx1x2y1y2).modInverse(P)).mod(P)
+            val y3 = (y1y2.add(x1x2)).multiply(BigInteger.ONE.subtract(dx1x2y1y2).modInverse(P)).mod(P)
+
+            return SimpleECPoint(x3, y3)
+        }
+
+        fun multiply(scalar: BigInteger): SimpleECPoint {
+            var res = SimpleECPoint(BigInteger.ZERO, BigInteger.ONE)
+            var base = this
+            var k = scalar
+            while (k > BigInteger.ZERO) {
+                if (k.testBit(0)) {
+                    res = res.add(base)
+                }
+                base = base.add(base)
+                k = k.shiftRight(1)
+            }
+            return res
+        }
     }
 
     companion object {
+        private val P = BigInteger("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed", 16)
         private val ED25519_L = BigInteger("1000000000000000000000000000000014def9de2f79cd65812631a5cf5d3ed1", 16)
-        private val ONE_SCALAR = ByteArray(32).apply { this[0] = 1 }
+        private val D = BigInteger("-121665", 10).multiply(BigInteger("121666", 10).modInverse(P)).mod(P)
+        private val I = BigInteger("2", 10).modPow(P.subtract(BigInteger.ONE).divide(BigInteger.valueOf(4)), P)
 
-        // AOSP 确切硬编码的 M 与 N 点 32B 压缩字节
+        private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666666")
         private val M_POINT_BYTES = hexToBytes("d75a980182b10ab7d54377c1139e3a706c4d24fe0c1d0b348e8ad8780b22c8d4")
         private val N_POINT_BYTES = hexToBytes("015708e23d49d748e129620a7195adb078a13f575d59a7622cd0146505c54383")
 
