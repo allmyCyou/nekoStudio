@@ -75,7 +75,7 @@ class AdbSpake2Engine(
      */
     fun generateClientHello(): ByteArray {
         check(state == State.INIT) { "Client Hello 已经生成过。" }
- 
+
         val passwordBytes = pairingCode.toByteArray(Charsets.UTF_8)
         val rawPrivateKey = ByteArray(64)
         random.nextBytes(rawPrivateKey)
@@ -96,8 +96,8 @@ class AdbSpake2Engine(
             this.hardenedWBytes = wHardened
 
             // 3. 计算 X = x * G + w * M
-            val pointXG = Constants.ED25519_BASEPOINT.mul(sx)
-            val pointWM = LIB_M.mul(sw)
+            val pointXG = Constants.ED25519_BASEPOINT.multiply(sx)
+            val pointWM = LIB_M.multiply(sw)
             val pointX = pointXG.add(pointWM)
 
             val encodedX = pointX.compress().toByteArray()
@@ -130,11 +130,12 @@ class AdbSpake2Engine(
         }
 
         // 计算 mask: w * N
-        val pointWN = LIB_N.mul(sw)
-        val pointQ = pointY.subtract(pointWN)
+        val pointWN = LIB_N.multiply(sw)
+        // Y - w * N
+        val pointQ = pointY.sub(pointWN)
 
         // 计算共享秘密点 K = x * (Y - w * N)
-        val pointK = pointQ.mul(sx)
+        val pointK = pointQ.multiply(sx)
         val dhShared = pointK.compress().toByteArray()
 
         try {
