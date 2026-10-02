@@ -185,6 +185,6 @@ public class AdbPairingClient(
         private const val HEADER_VERSION: Byte = 1
         private const val TYPE_SPAKE2_MSG: Byte = 0
         private const val TYPE_PEER_INFO: Byte = 1
-        private const val EXPORTED_KEY_LABEL = "adb-label\u0000"
+        private const val EXPORTED_KEY_LABEL = "adb-label"
     }
 }
