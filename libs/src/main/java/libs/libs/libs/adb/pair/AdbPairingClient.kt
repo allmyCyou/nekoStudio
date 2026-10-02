@@ -166,7 +166,8 @@ public class AdbPairingClient(
             ByteArray::class.java,
             Int::class.javaPrimitiveType
         )
-        return method.invoke(null, sslSocket, label, null, length) as ByteArray
+        // 注意：第 3 个参数传入 byteArrayOf() 而非 null
+        return method.invoke(null, sslSocket, label, byteArrayOf(), length) as ByteArray
     }
 
     companion object {

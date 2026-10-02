@@ -67,7 +67,7 @@ public class AdbSpake2Engine(
         // 2. 共享点 K = x * S
         val pointK = scalarMult(scalarX, pointS)
 
-        // 3. 计算 Master Key
+        // 3. 计算 Transcript SHA-512 Hash (Master Key)
         val md = MessageDigest.getInstance("SHA-512")
         updateWithLengthPrefix(md, myNameBytes)
         updateWithLengthPrefix(md, theirNameBytes)
@@ -78,9 +78,10 @@ public class AdbSpake2Engine(
 
         val masterKey = md.digest()
 
-        // 4. HKDF-SHA256 衍生 key
+        // 4. HKDF-SHA256 衍生 16 字节 AES 密钥
+        // 关键修复：BoringSSL SPAKE2 的 HKDF info 参数为 null (或空数组)
         val hkdf = HKDFBytesGenerator(SHA256Digest())
-        hkdf.init(HKDFParameters(masterKey, null, HKDF_INFO))
+        hkdf.init(HKDFParameters(masterKey, null, null))
         val secretKey = ByteArray(16)
         hkdf.generateBytes(secretKey, 0, 16)
 
@@ -92,7 +93,8 @@ public class AdbSpake2Engine(
 
     private fun createIv(counter: Long): ByteArray {
         val iv = ByteArray(12)
-        ByteBuffer.wrap(iv, 4, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(counter)
+        // 关键修复：ADB C++ memcpy 位于索引 0..7 (Little-Endian)
+        ByteBuffer.wrap(iv, 0, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(counter)
         return iv
     }
 
@@ -214,7 +216,6 @@ public class AdbSpake2Engine(
 
     /**
      * 扩展爱德华坐标系 (X:Y:Z:T)，满足 x = X/Z, y = Y/Z, x*y = T/Z
-     * 消除点加过程中的 modInverse 逆元计算，提升性能 100 倍以上
      */
     private class SimpleECPoint(
         val X: BigInteger,
@@ -285,8 +286,6 @@ public class AdbSpake2Engine(
         private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666666")
         private val M_POINT_BYTES = hexToBytes("d75a980182b10ab7d54377c1139e3a706c4d24fe0c1d0b348e8ad8780b22c8d4")
         private val N_POINT_BYTES = hexToBytes("015708e23d49d748e129620a7195adb078a13f575d59a7622cd0146505c54383")
-
-        private val HKDF_INFO = "adb pairing_auth aes-128-gcm key".toByteArray(Charsets.UTF_8)
 
         private fun hexToBytes(hex: String): ByteArray {
             val len = hex.length
