@@ -17,13 +17,13 @@ import javax.crypto.spec.SecretKeySpec
 // EdwardsPoint 运算符重载扩展
 
 /** 椭圆曲线点减法: P - Q (直接使用库中原生的 subtract) */
-private inline operator fun EdwardsPoint.minus(other: EdwardsPoint): EdwardsPoint = this.subtract(other)
+private operator fun EdwardsPoint.minus(other: EdwardsPoint): EdwardsPoint = this.subtract(other)
 
 /** 椭圆曲线点加法: P + Q */
-private inline operator fun EdwardsPoint.plus(other: EdwardsPoint): EdwardsPoint = this.add(other)
+private operator fun EdwardsPoint.plus(other: EdwardsPoint): EdwardsPoint = this.add(other)
 
 /** 椭圆曲线点标量乘法: P * s */
-private inline operator fun EdwardsPoint.times(scalar: Scalar): EdwardsPoint = this.multiply(scalar)
+private operator fun EdwardsPoint.times(scalar: Scalar): EdwardsPoint = this.multiply(scalar)
 
 
 /**
