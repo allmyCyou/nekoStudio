@@ -75,19 +75,19 @@ class AdbSpake2Engine(
      */
     fun generateClientHello(): ByteArray {
         check(state == State.INIT) { "Client Hello 已经生成过。" }
-
+ 
         val passwordBytes = pairingCode.toByteArray(Charsets.UTF_8)
         val rawPrivateKey = ByteArray(64)
         random.nextBytes(rawPrivateKey)
 
         try {
-            // 1. 生成随机私钥标量 x (约简 mod L)
-            val sx = Scalar.fromBitsModOrderWide(rawPrivateKey)
+            // 1. 生成随机私钥标量 x (64 字节 mod L 约简)
+            val sx = Scalar.fromBytesModOrderWide(rawPrivateKey)
             this.scalarX = sx
 
-            // 2. 口令 SHA-512 哈希并约简，计算加法混淆口令标量 w
+            // 2. 口令 SHA-512 哈希 (64 字节) 并约简，计算加法混淆口令标量 w
             val pHash = getSha512(passwordBytes)
-            val sw = Scalar.fromBitsModOrderWide(pHash)
+            val sw = Scalar.fromBytesModOrderWide(pHash)
             this.scalarW = sw
 
             // 提取 32 字节 Little-Endian 口令标量，并进行 BoringSSL harden (+L, +2L, +4L) 混淆
