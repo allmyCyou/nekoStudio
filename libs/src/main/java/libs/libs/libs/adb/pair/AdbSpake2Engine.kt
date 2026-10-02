@@ -13,6 +13,18 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
+// EdwardsPoint 运算符重载扩展（解决 curve25519-elisabeth 缺乏减法等运算符的问题）
+
+/** 椭圆曲线点减法: P - Q = P + (-Q) */
+private inline operator fun EdwardsPoint.minus(other: EdwardsPoint): EdwardsPoint = this.add(other.negate())
+
+/** 椭圆曲线点加法: P + Q */
+private inline operator fun EdwardsPoint.plus(other: EdwardsPoint): EdwardsPoint = this.add(other)
+
+/** 椭圆曲线点标量乘法: P * s */
+private inline operator fun EdwardsPoint.times(scalar: Scalar): EdwardsPoint = this.multiply(scalar)
+
+
 /**
  * 严格对齐 BoringSSL / AOSP pairing_auth.cpp 的 ADB SPAKE2 (Ed25519) 引擎
  */
@@ -95,10 +107,10 @@ class AdbSpake2Engine(
             val wHardened = hardenPassword(rawWBytes)
             this.hardenedWBytes = wHardened
 
-            // 3. 计算 X = x * G + w * M
-            val pointXG = Constants.ED25519_BASEPOINT.multiply(sx)
-            val pointWM = LIB_M.multiply(sw)
-            val pointX = pointXG.add(pointWM)
+            // 3. 计算 X = x * G + w * M (使用 Kotlin 运算符重载)
+            val pointXG = Constants.ED25519_BASEPOINT * sx
+            val pointWM = LIB_M * sw
+            val pointX = pointXG + pointWM
 
             val encodedX = pointX.compress().toByteArray()
             System.arraycopy(encodedX, 0, this.myMsg, 0, 32)
@@ -130,12 +142,13 @@ class AdbSpake2Engine(
         }
 
         // 计算 mask: w * N
-        val pointWN = LIB_N.multiply(sw)
-        // Y - w * N
-        val pointQ = pointY.sub(pointWN)
+        val pointWN = LIB_N * sw
+        
+        // 消除混淆项: Q = Y - w * N
+        val pointQ = pointY - pointWN
 
         // 计算共享秘密点 K = x * (Y - w * N)
-        val pointK = pointQ.multiply(sx)
+        val pointK = pointQ * sx
         val dhShared = pointK.compress().toByteArray()
 
         try {
