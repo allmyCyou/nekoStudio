@@ -7,7 +7,6 @@ import cafe.cryptography.curve25519.InvalidEncodingException
 import cafe.cryptography.curve25519.Scalar
 import cafe.cryptography.subtle.ConstantTime
 import java.security.MessageDigest
-import java.security.NoSuchAlgorithmException
 import java.security.SecureRandom
 import java.util.Arrays
 import javax.crypto.Cipher
@@ -15,7 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * 零第三方 SPAKE2 库依赖、完全对齐 BoringSSL / AOSP pairing_auth.cpp 的 ADB SPAKE2 引擎
+ * 完全对齐 BoringSSL / AOSP pairing_auth.cpp 的 ADB SPAKE2 引擎
  * 适用于 Android 11+ 无线调试配对 (Pairing Protocol)
  */
 class AdbSpake2Engine(
@@ -32,7 +31,6 @@ class AdbSpake2Engine(
     private val privateKey = ByteArray(32)
     private val myMsg = ByteArray(32)
     private val passwordScalar = ByteArray(32)
-    private val passwordHash = ByteArray(64)
 
     private var state = State.INIT
     private var derivedSessionKey: ByteArray? = null
@@ -40,7 +38,6 @@ class AdbSpake2Engine(
     private enum class State { INIT, MSG_GENERATED, KEY_GENERATED }
 
     companion object {
-        // AOSP / BoringSSL 官方 spake2.c 标准 Ed25519 基点 M、N 与 群阶 Group Order
         private val M_POINT_ENCODED = hexToBytes("5ada7e4bf6ddd9adb6626d32131c6b5c51a1e347a3478f53cfcf441b88eed12e")
         private val N_POINT_ENCODED = hexToBytes("10e3df0ae37d8e7a99b5fe74b44672103dbddcbd06af680d71329a11693bc778")
         private val GROUP_ORDER     = hexToBytes("edd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010")
@@ -71,7 +68,7 @@ class AdbSpake2Engine(
 
     /**
      * 第一阶段：生成 Client Hello 点 X (32 字节)
-     * 公式: X = x * G + w * M
+     * 公式: X = 8x * G + 8w * M
      */
     fun generateClientHello(): ByteArray {
         check(state == State.INIT) { "Client Hello has already been generated." }
@@ -81,7 +78,7 @@ class AdbSpake2Engine(
         random.nextBytes(rawPrivateKey)
 
         try {
-            // 1. 规整并对私钥进行 leftShift3 (x8)
+            // 1. 规整私钥并乘以 8 (leftShift3)
             val reducedPrivate = Scalar.fromBytesModOrderWide(rawPrivateKey).toByteArray()
             leftShift3(reducedPrivate)
             System.arraycopy(reducedPrivate, 0, this.privateKey, 0, 32)
@@ -89,15 +86,16 @@ class AdbSpake2Engine(
             // 计算 x * G
             val nativeP = multiplyByRawScalar(Constants.ED25519_BASEPOINT, this.privateKey)
 
-            // 2. 处理 口令 Password Hash 与 Scalar 混淆 (BoringSSL Hack)
+            // 2. 处理口令 Password Hash、加法混淆，并同样乘以 8 (Cofactor 8)
             val pHash = getSha512(passwordBytes)
-            System.arraycopy(pHash, 0, this.passwordHash, 0, 64)
-
             val reducedPassword = Scalar.fromBytesModOrderWide(pHash).toByteArray()
             val hardenedPassword = hardenPasswordScalar(reducedPassword)
+            
+            // 修正：口令标量加法混淆后需要做乘以 8 的位移
+            leftShift3(hardenedPassword)
             System.arraycopy(hardenedPassword, 0, this.passwordScalar, 0, 32)
 
-            // 3. 计算 w * M (Client 为 Alice 角色，掩码基点使用 M)
+            // 3. 计算 w * M
             val nativeMask = multiplyByRawScalar(LIB_M, this.passwordScalar)
             val nativePStar = nativeP.add(nativeMask)
 
@@ -113,7 +111,7 @@ class AdbSpake2Engine(
 
     /**
      * 第二阶段：处理 Server Hello 点 Y (32 字节) 并导出会话密钥
-     * 公式: K = x * (Y - w * N)
+     * 公式: K = 8x * (Y - 8w * N)
      */
     fun processServerHelloAndDeriveKey(serverHello: ByteArray) {
         check(state == State.MSG_GENERATED) { "Client Hello must be generated first." }
@@ -126,28 +124,28 @@ class AdbSpake2Engine(
             throw IllegalArgumentException("Server point Y is not on the Ed25519 curve.", e)
         }
 
-        // 计算 peer's mask: w * N (Client 对端为 Bob，掩码基点使用 N)
+        // 计算 peer's mask: 8w * N
         val nativePeersMask = multiplyByRawScalar(LIB_N, this.passwordScalar)
         val nativeQExt = nativeQStar.subtract(nativePeersMask)
 
-        // 共享点 dhShared = x * (Y - w * N)
+        // 共享点 dhShared = 8x * (Y - 8w * N)
         val dhShared = multiplyByRawScalar(nativeQExt, this.privateKey).compress().toByteArray()
 
         try {
-            // 拼接 Transcript 并计算 SHA-512 Digest
             val md = MessageDigest.getInstance("SHA-512")
 
-            // Alice 顺序：myName, theirName, myMsg, peerMsg, dhShared, passwordHash
+            // Alice 顺序：myName, theirName, myMsg, peerMsg, dhShared, passwordScalar
             updateWithLengthPrefix(md, myNameBytes, myNameBytes.size)
             updateWithLengthPrefix(md, theirNameBytes, theirNameBytes.size)
             updateWithLengthPrefix(md, myMsg, myMsg.size)
             updateWithLengthPrefix(md, peerMsg, peerMsg.size)
             updateWithLengthPrefix(md, dhShared, dhShared.size)
-            updateWithLengthPrefix(md, passwordHash, passwordHash.size)
+            
+            // 修正：写入 32 字节口令标量 (passwordScalar)，而非原始 64 字节哈希
+            updateWithLengthPrefix(md, passwordScalar, passwordScalar.size)
 
             val masterKey64 = md.digest()
 
-            // ADB 截取前 16 字节 (128-bit) 作为 AES-GCM 密钥
             val aesKey = ByteArray(16)
             System.arraycopy(masterKey64, 0, aesKey, 0, 16)
             this.derivedSessionKey = aesKey
@@ -160,9 +158,6 @@ class AdbSpake2Engine(
         }
     }
 
-    /**
-     * 使用 SPAKE2 协商出的会话密钥对载荷进行 AES-128-GCM 加密
-     */
     fun encryptPayload(plainData: ByteArray): ByteArray {
         val key = derivedSessionKey ?: throw IllegalStateException("Session key not established")
 
@@ -178,9 +173,6 @@ class AdbSpake2Engine(
         return iv + cipherText
     }
 
-    /**
-     * 解密服务端返回的响应
-     */
     fun decryptPayload(encryptedData: ByteArray): ByteArray {
         val key = derivedSessionKey ?: throw IllegalStateException("Session key not established")
         require(encryptedData.size > 12) { "Invalid encrypted payload length" }
@@ -196,13 +188,6 @@ class AdbSpake2Engine(
         return cipher.doFinal(cipherText)
     }
 
-    // =========================================================================
-    // 内部 BoringSSL 特殊算法实现部分
-    // =========================================================================
-
-    /**
-     * 将标量乘以 8 (左移 3 位)，消除 Cofactor 影响
-     */
     private fun leftShift3(n: ByteArray) {
         var carry = 0
         for (i in 0 until 32) {
@@ -213,35 +198,32 @@ class AdbSpake2Engine(
     }
 
     /**
-     * 还原 BoringSSL 口令标量混淆加法 (+ l, + 2l, + 4l)
+     * 还原 BoringSSL 口令标量混淆加法 (+L, +2L, +4L)
      */
     private fun hardenPasswordScalar(reducedPasswordScalar: ByteArray): ByteArray {
         val passwordScalar = MutableScalar(reducedPasswordScalar)
         val order = MutableScalar(GROUP_ORDER)
         val tmp = MutableScalar()
 
-        // 💡 必须在任何 addInPlace 修改前提取原始字节的 bit0, bit1, bit2
         val firstByte = reducedPasswordScalar[0].toInt() and 0xFF
         val bit0 = firstByte and 1
         val bit1 = (firstByte ushr 1) and 1
         val bit2 = (firstByte ushr 2) and 1
 
         try {
-            // Step 1: Check bit 0
+            // 修正：BoringSSL 逻辑为当 bit 为 0 时添加 order
             tmp.reset()
-            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit0, 1))
+            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit0, 0))
             passwordScalar.addInPlace(tmp)
             order.dblInPlace()
 
-            // Step 2: Check bit 1
             tmp.reset()
-            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit1, 1))
+            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit1, 0))
             passwordScalar.addInPlace(tmp)
             order.dblInPlace()
 
-            // Step 3: Check bit 2
             tmp.reset()
-            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit2, 1))
+            tmp.conditionalCopyFrom(order, tmp, ConstantTime.equal(bit2, 0))
             passwordScalar.addInPlace(tmp)
 
             return passwordScalar.getBytes().clone()
@@ -252,9 +234,6 @@ class AdbSpake2Engine(
         }
     }
 
-    /**
-     * 保持 256 位完整标量的未规整化点乘
-     */
     private fun multiplyByRawScalar(point: EdwardsPoint, scalar: ByteArray): EdwardsPoint {
         require(scalar.size == 32) { "Scalar must be 32 bytes." }
 
@@ -288,9 +267,6 @@ class AdbSpake2Engine(
         return selected
     }
 
-    /**
-     * 写入 8 字节小端 (Little-Endian) 长度前缀与数据
-     */
     private fun updateWithLengthPrefix(md: MessageDigest, data: ByteArray, len: Int) {
         val lenLe = ByteArray(8)
         var v = len.toLong() and 0xFFFFFFFFL
@@ -307,7 +283,6 @@ class AdbSpake2Engine(
         return md.digest(input)
     }
 
-    // 可变 32 字节 Scalar 辅助类
     private class MutableScalar(initBytes: ByteArray? = null) {
         private val bytes = ByteArray(32)
 
@@ -315,7 +290,6 @@ class AdbSpake2Engine(
             initBytes?.let { System.arraycopy(it, 0, bytes, 0, 32) }
         }
 
-        fun getByte(idx: Int) = bytes[idx]
         fun getBytes() = bytes
 
         fun reset() = Arrays.fill(bytes, 0.toByte())

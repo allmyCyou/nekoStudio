@@ -35,7 +35,6 @@ public object AdbProtoUtils {
     public fun decodePairingPacket(bytes: ByteArray): PairingPacket {
         if (bytes.isEmpty()) return PairingPacket()
         val input = ByteArrayInputStream(bytes)
-        // 默认类型直接初始化为 SPAKE2_MSG (0)
         var type = PairingPacket.Type.SPAKE2_MSG 
         var payload = byteArrayOf()
 
@@ -51,9 +50,12 @@ public object AdbProtoUtils {
                         if (wireType == 2) {
                             val len = readVarint32(input)
                             payload = ByteArray(len)
-                            val readBytes = input.read(payload)
-                            if (readBytes < len) {
-                                payload = payload.copyOf(maxOf(0, readBytes))
+                            if (len > 0) {
+                                val readBytes = input.read(payload)
+                                if (readBytes < len) {
+                                    if (readBytes == -1) throw EOFException("Protobuf payload 读取提前结束")
+                                    payload = payload.copyOf(readBytes)
+                                }
                             }
                         } else skipField(input, wireType)
                     }
@@ -96,9 +98,12 @@ public object AdbProtoUtils {
                         if (wireType == 2) {
                             val len = readVarint32(input)
                             pubKey = ByteArray(len)
-                            val readBytes = input.read(pubKey)
-                            if (readBytes < len) {
-                                pubKey = pubKey.copyOf(maxOf(0, readBytes))
+                            if (len > 0) {
+                                val readBytes = input.read(pubKey)
+                                if (readBytes < len) {
+                                    if (readBytes == -1) throw EOFException("Protobuf pubKey 读取提前结束")
+                                    pubKey = pubKey.copyOf(readBytes)
+                                }
                             }
                         } else skipField(input, wireType)
                     }

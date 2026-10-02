@@ -6,11 +6,12 @@ import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.tls.AdbTlsCertificate
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.EOFException
+import java.io.InputStream
+import java.io.OutputStream
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -88,12 +89,10 @@ public class AdbPairingClient(
                     // 3. 接收 Server Hello (SPAKE2 阶段 2)
                     val serverPacket = receivePacket(inputStream)
 
-                    // 校验包类型
                     require(serverPacket.type == PairingPacket.Type.SPAKE2_MSG) {
                         "Expected SPAKE2_MSG packet type, got: ${serverPacket.type}"
                     }
 
-                    // 💡 增加对 Server Hello Payload 长度的针对性判断
                     if (serverPacket.payload.isEmpty()) {
                         throw IOException("手机端拒绝了 Client Hello (返回空数据)")
                     }
@@ -104,7 +103,7 @@ public class AdbPairingClient(
 
                     spake2Engine.processServerHelloAndDeriveKey(serverPacket.payload)
 
-                    // 4. 发送 PeerInfo 客户端公钥 (SPAKE2 加密)
+                    // 4. 发送 PeerInfo 客户端公钥
                     val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
                     val clientPeerInfo = PeerInfo(
                         status = PeerInfo.Status.OK,
@@ -149,9 +148,8 @@ public class AdbPairingClient(
         }
     }
 
-    // 发送数据包：增加 4 字节 Big-Endian 长度头
     fun sendPacket(outputStream: OutputStream, packet: PairingPacket) {
-        val protobufBytes = encodePairingPacket(packet)
+        val protobufBytes = AdbProtoUtils.encodePairingPacket(packet)
         val length = protobufBytes.size
 
         val header = byteArrayOf(
@@ -166,7 +164,6 @@ public class AdbPairingClient(
         outputStream.flush()
     }
     
-    // 接收数据包：先读 4 字节长度头，再读取完整 Protobuf 报文
     fun receivePacket(inputStream: InputStream): PairingPacket {
         val header = ByteArray(4)
         readFully(inputStream, header)
@@ -176,13 +173,16 @@ public class AdbPairingClient(
                      ((header[2].toInt() and 0xFF) shl 8) or
                      (header[3].toInt() and 0xFF)
     
-        if (length <= 0 || length > 65536) {
+        // 修正：放行 length == 0 的情况
+        if (length < 0 || length > 65536) {
             throw IOException("收到异常的报文长度帧: $length")
         }
 
         val payload = ByteArray(length)
-        readFully(inputStream, payload)
-        return decodePairingPacket(payload)
+        if (length > 0) {
+            readFully(inputStream, payload)
+        }
+        return AdbProtoUtils.decodePairingPacket(payload)
     }
     
     private fun readFully(inputStream: InputStream, buffer: ByteArray) {
