@@ -759,7 +759,9 @@ class MainActivity : ComponentActivity() {
     private fun updateConsoleTitle(newTitle: String) {
         // 1. 持久化保存到 SharedPreferences
         val prefs = applicationContext.getSharedPreferences("msg_name_title", Context.MODE_PRIVATE)
-        prefs.edit().putString("key_name_title", newTitle).apply()
+        prefs.edit { 
+            putString("key_name_title", newTitle) 
+        }
 
         reloadServiceAvatar()
  
