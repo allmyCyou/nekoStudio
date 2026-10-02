@@ -19,8 +19,8 @@ import javax.crypto.spec.SecretKeySpec
  */
 class AdbSpake2Engine(
     private val pairingCode: String,
-    private val myName: String = "client",
-    private val theirName: String = "server"
+    private val myName: String = "adb pair client",
+    private val theirName: String = "adb pair server"
 ) {
 
     private val random = SecureRandom()
