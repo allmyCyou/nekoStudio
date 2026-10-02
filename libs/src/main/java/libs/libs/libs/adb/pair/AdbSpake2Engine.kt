@@ -5,8 +5,12 @@ import cafe.cryptography.curve25519.Constants
 import cafe.cryptography.curve25519.EdwardsPoint
 import cafe.cryptography.curve25519.InvalidEncodingException
 import cafe.cryptography.curve25519.Scalar
-import cafe.cryptography.subtle.ConstantTime
+import org.bouncycastle.crypto.digests.SHA256Digest
+import org.bouncycastle.crypto.generators.HKDFBytesGenerator
+import org.bouncycastle.crypto.params.HKDFParameters
 import java.math.BigInteger
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Arrays
@@ -14,61 +18,40 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-// EdwardsPoint 运算符重载扩展
-
-/** 椭圆曲线点减法: P - Q (直接使用库中原生的 subtract) */
 private operator fun EdwardsPoint.minus(other: EdwardsPoint): EdwardsPoint = this.subtract(other)
-
-/** 椭圆曲线点加法: P + Q */
 private operator fun EdwardsPoint.plus(other: EdwardsPoint): EdwardsPoint = this.add(other)
-
-/** 椭圆曲线点标量乘法: P * s */
 private operator fun EdwardsPoint.times(scalar: Scalar): EdwardsPoint = this.multiply(scalar)
 
-
-/**
- * 严格对齐 BoringSSL / AOSP pairing_auth.cpp 的 ADB SPAKE2 (Ed25519) 引擎
- */
-class AdbSpake2Engine(
-    private val pairingCode: String,
-    private val myName: String = "adb pair client",
-    private val theirName: String = "adb pair server"
+public class AdbSpake2Engine(
+    private val passwordBytes: ByteArray
 ) : AutoCloseable {
 
     private val random = SecureRandom()
-    private val myNameBytes = myName.toByteArray(Charsets.UTF_8)
-    private val theirNameBytes = theirName.toByteArray(Charsets.UTF_8)
+    // AOSP 规范：客户端与服务端标识末尾必须带 \0
+    private val myNameBytes = "adb pair client\u0000".toByteArray(Charsets.UTF_8)
+    private val theirNameBytes = "adb pair server\u0000".toByteArray(Charsets.UTF_8)
 
-    // 内部保留的 32 字节 Little-Endian 状态
     private var scalarX: Scalar? = null
     private var scalarW: Scalar? = null
     private var hardenedWBytes: ByteArray? = null
 
     private val myMsg = ByteArray(32)
-    private var state = State.INIT
     private var derivedSessionKey: ByteArray? = null
 
-    private enum class State { INIT, MSG_GENERATED, KEY_GENERATED, DESTROYED }
+    // AES-GCM IV 计数器 (64位小端序)
+    private var encIv: Long = 0L
+    private var decIv: Long = 0L
 
     companion object {
-        // BoringSSL SPAKE2 Ed25519 标准生成元 M 和 N 的压缩坐标 (Hex)
         private val M_POINT_ENCODED = hexToBytes("5ada7e4bf6ddd9adb6626d32131c6b5c51a1e347a3478f53cfcf441b88eed12e")
         private val N_POINT_ENCODED = hexToBytes("10e3df0ae37d8e7a99b5fe74b44672103dbddcbd06af680d71329a11693bc778")
-
-        // Ed25519 群阶 L = 2^252 + 27742317777372353535851937790883648493
         private val L_BIG_INTEGER = BigInteger("1000000000000000000000000000000014def9de2f79cd65812631a5cf5d3ed1", 16)
 
-        private val LIB_M: EdwardsPoint
-        private val LIB_N: EdwardsPoint
+        // HKDF Info 标签
+        private val HKDF_INFO = "adb pairing_auth aes-128-gcm key".toByteArray(Charsets.UTF_8)
 
-        init {
-            try {
-                LIB_M = CompressedEdwardsY(M_POINT_ENCODED).decompress()
-                LIB_N = CompressedEdwardsY(N_POINT_ENCODED).decompress()
-            } catch (e: Exception) {
-                throw ExceptionInInitializerError("AdbSpake2Engine 点 M/N 初始化失败: ${e.message}")
-            }
-        }
+        private val LIB_M: EdwardsPoint = CompressedEdwardsY(M_POINT_ENCODED).decompress()
+        private val LIB_N: EdwardsPoint = CompressedEdwardsY(N_POINT_ENCODED).decompress()
 
         private fun hexToBytes(hex: String): ByteArray {
             val len = hex.length
@@ -80,90 +63,53 @@ class AdbSpake2Engine(
             }
             return out
         }
-
-        /**
-         * 常数时间校验两个字节数组是否一致（防御时间侧信道攻击）
-         */
-        fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
-            return ConstantTime.equal(a, b) == 1
-        }
     }
 
-    /**
-     * 第一阶段：生成 Client Hello 点 X (32 字节)
-     * 公式: X = x * G + w * M
-     */
-    fun generateClientHello(): ByteArray {
-        check(state == State.INIT) { "Client Hello 已经生成过或引擎已被销毁。" }
-
-        val passwordBytes = pairingCode.toByteArray(Charsets.UTF_8)
+    public fun generateClientHello(): ByteArray {
         val rawPrivateKey = ByteArray(64)
         random.nextBytes(rawPrivateKey)
 
         try {
-            // 1. 生成随机私钥标量 x (64 字节 mod L 约简)
             val sx = Scalar.fromBytesModOrderWide(rawPrivateKey)
             this.scalarX = sx
 
-            // 2. 口令 SHA-512 哈希 (64 字节) 并约简，计算加法混淆口令标量 w
             val pHash = getSha512(passwordBytes)
             val sw = Scalar.fromBytesModOrderWide(pHash)
             this.scalarW = sw
 
-            // 提取 32 字节 Little-Endian 口令标量，并进行 BoringSSL harden (+L, +2L, +4L) 混淆
             val rawWBytes = sw.toByteArray()
             val wHardened = hardenPassword(rawWBytes)
             this.hardenedWBytes = wHardened
 
-            // 3. 计算 X = x * G + w * M
-            // 使用 ED25519_BASEPOINT_TABLE 预计算表加速点乘 x * G
             val pointXG = Constants.ED25519_BASEPOINT_TABLE.multiply(sx)
             val pointWM = LIB_M * sw
             val pointX = pointXG + pointWM
 
             val encodedX = pointX.compress().toByteArray()
             System.arraycopy(encodedX, 0, this.myMsg, 0, 32)
-
-            this.state = State.MSG_GENERATED
             return myMsg.clone()
         } finally {
             Arrays.fill(rawPrivateKey, 0.toByte())
         }
     }
 
-    /**
-     * 第二阶段：处理 Server Hello 点 Y (32 字节) 并导出会话密钥
-     * 公式: K = x * (Y - w * N)
-     */
-    fun processServerHelloAndDeriveKey(serverHello: ByteArray) {
-        check(state == State.MSG_GENERATED) { "必须先成功生成 Client Hello。" }
-        require(serverHello.size == 32) { "Server Hello 长度必须为 32 字节。" }
+    public fun processServerHelloAndDeriveKey(serverHello: ByteArray) {
+        require(serverHello.size == 32) { "Server Hello 长度必须为 32 字节" }
 
         val sx = scalarX ?: throw IllegalStateException("Scalar X 未初始化")
         val sw = scalarW ?: throw IllegalStateException("Scalar W 未初始化")
         val wBytes = hardenedWBytes ?: throw IllegalStateException("Hardened W 未初始化")
 
         val peerMsg = serverHello.clone()
-        val pointY = try {
-            CompressedEdwardsY(peerMsg).decompress()
-        } catch (e: InvalidEncodingException) {
-            throw IllegalArgumentException("Server point Y 不是有效的 Ed25519 曲线点。", e)
-        }
+        val pointY = CompressedEdwardsY(peerMsg).decompress()
 
-        // 计算 mask: w * N
         val pointWN = LIB_N * sw
-        
-        // 消除混淆项: Q = Y - w * N (使用扩展的 subtract 减法)
         val pointQ = pointY - pointWN
-
-        // 计算共享秘密点 K = x * (Y - w * N)
         val pointK = pointQ * sx
         val dhShared = pointK.compress().toByteArray()
 
         try {
             val md = MessageDigest.getInstance("SHA-512")
-
-            // Alice 顺序：myName, theirName, myMsg, peerMsg, dhShared, wBytes (32 字节)
             updateWithLengthPrefix(md, myNameBytes)
             updateWithLengthPrefix(md, theirNameBytes)
             updateWithLengthPrefix(md, myMsg)
@@ -173,11 +119,13 @@ class AdbSpake2Engine(
 
             val masterKey64 = md.digest()
 
-            // 取 SHA-512 结果的前 16 字节作为 AES-128-GCM 会话密钥
-            val aesKey = masterKey64.copyOfRange(0, 16)
-            this.derivedSessionKey = aesKey
+            // 使用 HKDF-SHA256 派生 AES-128 密钥
+            val hkdf = HKDFBytesGenerator(SHA256Digest())
+            hkdf.init(HKDFParameters(masterKey64, null, HKDF_INFO))
+            val secretKey = ByteArray(16)
+            hkdf.generateBytes(secretKey, 0, 16)
 
-            this.state = State.KEY_GENERATED
+            this.derivedSessionKey = secretKey
         } finally {
             Arrays.fill(dhShared, 0.toByte())
             Arrays.fill(wBytes, 0.toByte())
@@ -185,82 +133,44 @@ class AdbSpake2Engine(
     }
 
     /**
-     * AES-128-GCM 加密 Payload (带随机 12 字节 IV)
+     * 加密 Payload（使用自增 Long 计数器生成 12 字节小端序 IV）
      */
-    fun encryptPayload(plainData: ByteArray): ByteArray {
-        val key = derivedSessionKey ?: throw IllegalStateException("会话密钥尚未建立")
-
-        val iv = ByteArray(12)
-        random.nextBytes(iv)
+    public fun encryptPayload(plainData: ByteArray): ByteArray {
+        val key = derivedSessionKey ?: throw IllegalStateException("会话密钥未建立")
+        val iv = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).putLong(encIv++).array()
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val keySpec = SecretKeySpec(key, "AES")
-        val gcmSpec = GCMParameterSpec(128, iv)
-        cipher.init(Cipher.ENCRYPT_MODE, keySpec, gcmSpec)
-
-        val cipherText = cipher.doFinal(plainData)
-        return iv + cipherText
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        return cipher.doFinal(plainData)
     }
 
     /**
-     * AES-128-GCM 解密 Payload
+     * 解密 Payload
      */
-    fun decryptPayload(encryptedData: ByteArray): ByteArray {
-        val key = derivedSessionKey ?: throw IllegalStateException("会话密钥尚未建立")
-        require(encryptedData.size > 12) { "加密 Payload 长度非法" }
-
-        val iv = encryptedData.copyOfRange(0, 12)
-        val cipherText = encryptedData.copyOfRange(12, encryptedData.size)
+    public fun decryptPayload(encryptedData: ByteArray): ByteArray {
+        val key = derivedSessionKey ?: throw IllegalStateException("会话密钥未建立")
+        val iv = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).putLong(decIv++).array()
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        val keySpec = SecretKeySpec(key, "AES")
-        val gcmSpec = GCMParameterSpec(128, iv)
-        cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
-
-        return cipher.doFinal(cipherText)
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        return cipher.doFinal(encryptedData)
     }
 
-    /**
-     * 显式清空内存中的私钥与密钥信息
-     */
     override fun close() {
-        if (state == State.DESTROYED) return
-        
         derivedSessionKey?.let { Arrays.fill(it, 0.toByte()) }
         hardenedWBytes?.let { Arrays.fill(it, 0.toByte()) }
         Arrays.fill(myMsg, 0.toByte())
-        
-        scalarX = null
-        scalarW = null
-        derivedSessionKey = null
-        hardenedWBytes = null
-        
-        state = State.DESTROYED
     }
 
-    /**
-     * BoringSSL 规范中的口令混淆：当 w 的 low bit 为 0 时累加 L, 2L, 4L
-     */
     private fun hardenPassword(rawWLittleEndian: ByteArray): ByteArray {
         var w = leBytesToBigInteger(rawWLittleEndian)
-
-        if (!w.testBit(0)) {
-            w = w.add(L_BIG_INTEGER)
-        }
-        if (!w.testBit(1)) {
-            w = w.add(L_BIG_INTEGER.shiftLeft(1))
-        }
-        if (!w.testBit(2)) {
-            w = w.add(L_BIG_INTEGER.shiftLeft(2))
-        }
-
+        if (!w.testBit(0)) w = w.add(L_BIG_INTEGER)
+        if (!w.testBit(1)) w = w.add(L_BIG_INTEGER.shiftLeft(1))
+        if (!w.testBit(2)) w = w.add(L_BIG_INTEGER.shiftLeft(2))
         return bigIntegerToLeBytes(w)
     }
 
-    private fun leBytesToBigInteger(bytes: ByteArray): BigInteger {
-        val reversed = bytes.reversedArray()
-        return BigInteger(1, reversed)
-    }
+    private fun leBytesToBigInteger(bytes: ByteArray): BigInteger = BigInteger(1, bytes.reversedArray())
 
     private fun bigIntegerToLeBytes(n: BigInteger): ByteArray {
         val be = n.toByteArray()
@@ -283,8 +193,5 @@ class AdbSpake2Engine(
         md.update(data)
     }
 
-    private fun getSha512(input: ByteArray): ByteArray {
-        val md = MessageDigest.getInstance("SHA-512")
-        return md.digest(input)
-    }
+    private fun getSha512(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-512").digest(input)
 }

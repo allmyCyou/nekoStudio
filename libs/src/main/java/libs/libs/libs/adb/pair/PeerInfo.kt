@@ -1,25 +1,36 @@
 package libs.libs.libs.adb.pair
 
-public data class PeerInfo(
-    val status: Int = Status.UNKNOWN,
-    val pubKey: ByteArray = byteArrayOf()
+import java.nio.ByteBuffer
+
+public class PeerInfo(
+    public val type: Byte = ADB_RSA_PUB_KEY,
+    data: ByteArray = byteArrayOf()
 ) {
-    public object Status {
-        public const val UNKNOWN: Int = 0
-        public const val OK: Int = 1
-        public const val FAIL: Int = 2
+    public val data: ByteArray = ByteArray(MAX_PEER_INFO_SIZE - 1)
+
+    init {
+        System.arraycopy(data, 0, this.data, 0, data.size.coerceAtMost(MAX_PEER_INFO_SIZE - 1))
     }
 
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-        other as PeerInfo
-        return status == other.status && pubKey.contentEquals(other.pubKey)
+    public fun toByteArray(): ByteArray {
+        val buffer = ByteBuffer.allocate(MAX_PEER_INFO_SIZE)
+        buffer.put(type)
+        buffer.put(data)
+        return buffer.array()
     }
 
-    override fun hashCode(): Int {
-        var result = status
-        result = 31 * result + pubKey.contentHashCode()
-        return result
+    companion object {
+        public const val MAX_PEER_INFO_SIZE: Int = 8192 // 1 shl 13
+        public const val ADB_RSA_PUB_KEY: Byte = 0
+        public const val ADB_DEVICE_GUID: Byte = 1
+
+        public fun fromByteArray(bytes: ByteArray): PeerInfo {
+            require(bytes.size == MAX_PEER_INFO_SIZE) { "Invalid PeerInfo size: ${bytes.size}" }
+            val buffer = ByteBuffer.wrap(bytes)
+            val type = buffer.get()
+            val data = ByteArray(MAX_PEER_INFO_SIZE - 1)
+            buffer.get(data)
+            return PeerInfo(type, data)
+        }
     }
 }
