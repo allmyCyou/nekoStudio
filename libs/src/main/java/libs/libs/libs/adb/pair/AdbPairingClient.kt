@@ -148,15 +148,19 @@ public class AdbPairingClient(
         }
     }
 
+    /**
+     * 发送配对帧 (4 字节小端序长度 + Protobuf Payload)
+     */
     fun sendPacket(outputStream: OutputStream, packet: PairingPacket) {
         val protobufBytes = AdbProtoUtils.encodePairingPacket(packet)
         val length = protobufBytes.size
 
+        // 小端序 (Little-Endian)
         val header = byteArrayOf(
-            (length ushr 24 and 0xFF).toByte(),
-            (length ushr 16 and 0xFF).toByte(),
+            (length and 0xFF).toByte(),
             (length ushr 8 and 0xFF).toByte(),
-            (length and 0xFF).toByte()
+            (length ushr 16 and 0xFF).toByte(),
+            (length ushr 24 and 0xFF).toByte()
         )
 
         outputStream.write(header)
@@ -164,16 +168,19 @@ public class AdbPairingClient(
         outputStream.flush()
     }
     
+    /**
+     * 接收配对帧 (4 字节小端序长度 + Protobuf Payload)
+     */
     fun receivePacket(inputStream: InputStream): PairingPacket {
         val header = ByteArray(4)
         readFully(inputStream, header)
 
-        val length = ((header[0].toInt() and 0xFF) shl 24) or
-                     ((header[1].toInt() and 0xFF) shl 16) or
-                     ((header[2].toInt() and 0xFF) shl 8) or
-                     (header[3].toInt() and 0xFF)
-    
-        // 修正：放行 length == 0 的情况
+        // 小端序 (Little-Endian) 解析
+        val length = (header[0].toInt() and 0xFF) or
+                     ((header[1].toInt() and 0xFF) shl 8) or
+                     ((header[2].toInt() and 0xFF) shl 16) or
+                     ((header[3].toInt() and 0xFF) shl 24)
+
         if (length < 0 || length > 65536) {
             throw IOException("收到异常的报文长度帧: $length")
         }

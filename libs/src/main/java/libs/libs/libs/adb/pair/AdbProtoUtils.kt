@@ -9,7 +9,7 @@ public object AdbProtoUtils {
     private fun readVarint32(input: ByteArrayInputStream): Int {
         var result = 0
         var shift = 0
-        while (shift < 32) {
+        while (shift < 35) {
             val b = input.read()
             if (b == -1) throw EOFException("流已结束，服务端已断开连接")
             result = result or ((b and 0x7F) shl shift)
