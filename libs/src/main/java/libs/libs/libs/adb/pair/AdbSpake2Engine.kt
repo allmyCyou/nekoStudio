@@ -5,6 +5,7 @@ import cafe.cryptography.curve25519.Constants
 import cafe.cryptography.curve25519.EdwardsPoint
 import cafe.cryptography.curve25519.InvalidEncodingException
 import cafe.cryptography.curve25519.Scalar
+import cafe.cryptography.subtle.ConstantTime
 import java.math.BigInteger
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -13,10 +14,10 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-// EdwardsPoint 运算符重载扩展（解决 curve25519-elisabeth 缺乏减法等运算符的问题）
+// EdwardsPoint 运算符重载扩展
 
-/** 椭圆曲线点减法: P - Q = P + (-Q) */
-private inline operator fun EdwardsPoint.minus(other: EdwardsPoint): EdwardsPoint = this.add(other.negate())
+/** 椭圆曲线点减法: P - Q (直接使用库中原生的 subtract) */
+private inline operator fun EdwardsPoint.minus(other: EdwardsPoint): EdwardsPoint = this.subtract(other)
 
 /** 椭圆曲线点加法: P + Q */
 private inline operator fun EdwardsPoint.plus(other: EdwardsPoint): EdwardsPoint = this.add(other)
@@ -32,7 +33,7 @@ class AdbSpake2Engine(
     private val pairingCode: String,
     private val myName: String = "adb pair client",
     private val theirName: String = "adb pair server"
-) {
+) : AutoCloseable {
 
     private val random = SecureRandom()
     private val myNameBytes = myName.toByteArray(Charsets.UTF_8)
@@ -47,7 +48,7 @@ class AdbSpake2Engine(
     private var state = State.INIT
     private var derivedSessionKey: ByteArray? = null
 
-    private enum class State { INIT, MSG_GENERATED, KEY_GENERATED }
+    private enum class State { INIT, MSG_GENERATED, KEY_GENERATED, DESTROYED }
 
     companion object {
         // BoringSSL SPAKE2 Ed25519 标准生成元 M 和 N 的压缩坐标 (Hex)
@@ -65,7 +66,7 @@ class AdbSpake2Engine(
                 LIB_M = CompressedEdwardsY(M_POINT_ENCODED).decompress()
                 LIB_N = CompressedEdwardsY(N_POINT_ENCODED).decompress()
             } catch (e: Exception) {
-                throw ExceptionInInitializerError("AdbSpake2Engine 初始化失败: ${e.message}")
+                throw ExceptionInInitializerError("AdbSpake2Engine 点 M/N 初始化失败: ${e.message}")
             }
         }
 
@@ -79,6 +80,13 @@ class AdbSpake2Engine(
             }
             return out
         }
+
+        /**
+         * 常数时间校验两个字节数组是否一致（防御时间侧信道攻击）
+         */
+        fun constantTimeEquals(a: ByteArray, b: ByteArray): Boolean {
+            return ConstantTime.equal(a, b) == 1
+        }
     }
 
     /**
@@ -86,7 +94,7 @@ class AdbSpake2Engine(
      * 公式: X = x * G + w * M
      */
     fun generateClientHello(): ByteArray {
-        check(state == State.INIT) { "Client Hello 已经生成过。" }
+        check(state == State.INIT) { "Client Hello 已经生成过或引擎已被销毁。" }
 
         val passwordBytes = pairingCode.toByteArray(Charsets.UTF_8)
         val rawPrivateKey = ByteArray(64)
@@ -107,8 +115,9 @@ class AdbSpake2Engine(
             val wHardened = hardenPassword(rawWBytes)
             this.hardenedWBytes = wHardened
 
-            // 3. 计算 X = x * G + w * M (使用 Kotlin 运算符重载)
-            val pointXG = Constants.ED25519_BASEPOINT * sx
+            // 3. 计算 X = x * G + w * M
+            // 使用 ED25519_BASEPOINT_TABLE 预计算表加速点乘 x * G
+            val pointXG = Constants.ED25519_BASEPOINT_TABLE.multiply(sx)
             val pointWM = LIB_M * sw
             val pointX = pointXG + pointWM
 
@@ -127,7 +136,7 @@ class AdbSpake2Engine(
      * 公式: K = x * (Y - w * N)
      */
     fun processServerHelloAndDeriveKey(serverHello: ByteArray) {
-        check(state == State.MSG_GENERATED) { "必须先生成 Client Hello。" }
+        check(state == State.MSG_GENERATED) { "必须先成功生成 Client Hello。" }
         require(serverHello.size == 32) { "Server Hello 长度必须为 32 字节。" }
 
         val sx = scalarX ?: throw IllegalStateException("Scalar X 未初始化")
@@ -144,7 +153,7 @@ class AdbSpake2Engine(
         // 计算 mask: w * N
         val pointWN = LIB_N * sw
         
-        // 消除混淆项: Q = Y - w * N
+        // 消除混淆项: Q = Y - w * N (使用扩展的 subtract 减法)
         val pointQ = pointY - pointWN
 
         // 计算共享秘密点 K = x * (Y - w * N)
@@ -175,6 +184,9 @@ class AdbSpake2Engine(
         }
     }
 
+    /**
+     * AES-128-GCM 加密 Payload (带随机 12 字节 IV)
+     */
     fun encryptPayload(plainData: ByteArray): ByteArray {
         val key = derivedSessionKey ?: throw IllegalStateException("会话密钥尚未建立")
 
@@ -190,6 +202,9 @@ class AdbSpake2Engine(
         return iv + cipherText
     }
 
+    /**
+     * AES-128-GCM 解密 Payload
+     */
     fun decryptPayload(encryptedData: ByteArray): ByteArray {
         val key = derivedSessionKey ?: throw IllegalStateException("会话密钥尚未建立")
         require(encryptedData.size > 12) { "加密 Payload 长度非法" }
@@ -203,6 +218,24 @@ class AdbSpake2Engine(
         cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
 
         return cipher.doFinal(cipherText)
+    }
+
+    /**
+     * 显式清空内存中的私钥与密钥信息
+     */
+    override fun close() {
+        if (state == State.DESTROYED) return
+        
+        derivedSessionKey?.let { Arrays.fill(it, 0.toByte()) }
+        hardenedWBytes?.let { Arrays.fill(it, 0.toByte()) }
+        Arrays.fill(myMsg, 0.toByte())
+        
+        scalarX = null
+        scalarW = null
+        derivedSessionKey = null
+        hardenedWBytes = null
+        
+        state = State.DESTROYED
     }
 
     /**
