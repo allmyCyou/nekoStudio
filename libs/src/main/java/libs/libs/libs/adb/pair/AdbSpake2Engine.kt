@@ -19,7 +19,6 @@ public class AdbSpake2Engine(
 
     private val random = SecureRandom()
 
-    // 移除末尾字符 '\u0000'，对齐 AOSP 定义
     private val myNameBytes = "adb pair client".toByteArray(Charsets.UTF_8)
     private val theirNameBytes = "adb pair server".toByteArray(Charsets.UTF_8)
 
@@ -91,7 +90,6 @@ public class AdbSpake2Engine(
         Arrays.fill(pointK, 0.toByte())
     }
 
-    // 符合 AOSP pairing_auth 规范的 IV 布局 (前4字节0，后8字节Little-Endian计数器)
     private fun createIv(counter: Long): ByteArray {
         val iv = ByteArray(12)
         ByteBuffer.wrap(iv, 4, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(counter)
@@ -125,23 +123,22 @@ public class AdbSpake2Engine(
 
     // --- 底层 LE 字节序 & 曲线点运算 ---
 
-    // 防止 BigInteger.toByteArray() 追加前导 0x00 导致的小端转置位移
-    private fun toLittleEndian32(bigInt: BigInteger): ByteArray {
-        val src = bigInt.toByteArray()
-        val out = ByteArray(32)
-        val start = if (src.isNotEmpty() && src[0] == 0.toByte()) 1 else 0
-        val len = src.size - start
-        for (i in 0 until minOf(len, 32)) {
-            out[i] = src[src.size - 1 - i]
+    private fun toLittleEndian32(bigInt: BigInteger, modulus: BigInteger): ByteArray {
+        val v = bigInt.mod(modulus)
+        val raw = v.toByteArray()
+        val result = ByteArray(32)
+        for (i in raw.indices) {
+            val targetIdx = raw.size - 1 - i
+            if (targetIdx in 0..31) {
+                result[targetIdx] = raw[i]
+            }
         }
-        return out
+        return result
     }
 
     private fun scReduce(input64: ByteArray, out32: ByteArray) {
         val bigInt = BigInteger(1, input64.reversedArray())
-        val reduced = bigInt.mod(ED25519_L)
-        val leBytes = toLittleEndian32(reduced)
-
+        val leBytes = toLittleEndian32(bigInt, ED25519_L)
         Arrays.fill(out32, 0.toByte())
         System.arraycopy(leBytes, 0, out32, 0, 32)
     }
@@ -165,9 +162,9 @@ public class AdbSpake2Engine(
     }
 
     private fun pointNegate(pointBytes: ByteArray): ByteArray {
-        val res = pointBytes.clone()
-        res[31] = (res[31].toInt() xor 0x80).toByte()
-        return res
+        val p = parseCurvePoint(pointBytes)
+        val negP = SimpleECPoint(P.subtract(p.x).mod(P), p.y)
+        return encodeCurvePoint(negP)
     }
 
     private fun updateWithLengthPrefix(md: MessageDigest, data: ByteArray) {
@@ -184,15 +181,17 @@ public class AdbSpake2Engine(
         val copy = bytes.clone()
         val xBit = (copy[31].toInt() and 0x80) != 0
         copy[31] = (copy[31].toInt() and 0x7F).toByte()
-        
-        val y = BigInteger(1, copy.reversedArray())
+
+        val y = BigInteger(1, copy.reversedArray()).mod(P)
         val x = recoverX(y, xBit)
         return SimpleECPoint(x, y)
     }
 
     private fun encodeCurvePoint(point: SimpleECPoint): ByteArray {
-        val result = toLittleEndian32(point.y)
-        if (point.x.testBit(0)) {
+        val x = point.x.mod(P)
+        val y = point.y.mod(P)
+        val result = toLittleEndian32(y, P)
+        if (x.testBit(0)) {
             result[31] = (result[31].toInt() or 0x80).toByte()
         }
         return result
@@ -204,23 +203,34 @@ public class AdbSpake2Engine(
         val den = D.multiply(y2).add(BigInteger.ONE).mod(P)
         var x = num.multiply(den.modInverse(P)).modPow(P.add(BigInteger.valueOf(3)).divide(BigInteger.valueOf(8)), P)
 
-        if (x.multiply(x).subtract(num.multiply(den.modInverse(P))).mod(P) != BigInteger.ZERO) {
+        val check = x.multiply(x).subtract(num.multiply(den.modInverse(P))).mod(P)
+        if (check != BigInteger.ZERO) {
             x = x.multiply(I).mod(P)
         }
         if (x.testBit(0) != xBit) {
-            x = P.subtract(x)
+            x = P.subtract(x).mod(P)
         }
         return x
     }
 
     private inner class SimpleECPoint(val x: BigInteger, val y: BigInteger) {
         fun add(other: SimpleECPoint): SimpleECPoint {
-            val x1x2 = x.multiply(other.x).mod(P)
-            val y1y2 = y.multiply(other.y).mod(P)
+            val x1 = this.x.mod(P)
+            val y1 = this.y.mod(P)
+            val x2 = other.x.mod(P)
+            val y2 = other.y.mod(P)
+
+            val x1x2 = x1.multiply(x2).mod(P)
+            val y1y2 = y1.multiply(y2).mod(P)
             val dx1x2y1y2 = D.multiply(x1x2).multiply(y1y2).mod(P)
 
-            val x3 = (x.multiply(other.y).add(y.multiply(other.x))).multiply(BigInteger.ONE.add(dx1x2y1y2).modInverse(P)).mod(P)
-            val y3 = (y1y2.add(x1x2)).multiply(BigInteger.ONE.subtract(dx1x2y1y2).modInverse(P)).mod(P)
+            val numX = x1.multiply(y2).add(y1.multiply(x2)).mod(P)
+            val denX = BigInteger.ONE.add(dx1x2y1y2).modInverse(P)
+            val x3 = numX.multiply(denX).mod(P)
+
+            val numY = y1y2.add(x1x2).mod(P)
+            val denY = BigInteger.ONE.subtract(dx1x2y1y2).modInverse(P)
+            val y3 = numY.multiply(denY).mod(P)
 
             return SimpleECPoint(x3, y3)
         }
@@ -228,7 +238,7 @@ public class AdbSpake2Engine(
         fun multiply(scalar: BigInteger): SimpleECPoint {
             var res = SimpleECPoint(BigInteger.ZERO, BigInteger.ONE)
             var base = this
-            var k = scalar
+            var k = scalar.mod(ED25519_L)
             while (k > BigInteger.ZERO) {
                 if (k.testBit(0)) {
                     res = res.add(base)
@@ -246,10 +256,7 @@ public class AdbSpake2Engine(
         private val D = BigInteger("-121665", 10).multiply(BigInteger("121666", 10).modInverse(P)).mod(P)
         private val I = BigInteger("2", 10).modPow(P.subtract(BigInteger.ONE).divide(BigInteger.valueOf(4)), P)
 
-        // Ed25519 Base Point (Little-Endian Hex)
         private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666666")
-        
-        // AOSP M 与 N 坐标点 Hex
         private val M_POINT_BYTES = hexToBytes("d75a980182b10ab7d54377c1139e3a706c4d24fe0c1d0b348e8ad8780b22c8d4")
         private val N_POINT_BYTES = hexToBytes("015708e23d49d748e129620a7195adb078a13f575d59a7622cd0146505c54383")
 

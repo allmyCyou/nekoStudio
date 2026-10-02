@@ -19,7 +19,7 @@
 - [ ] MTK BROM
 
 ## su
-- KernelSU、SukiSU、Magisk
+- KernelSU、SukiSU
 ```shell
 # Flashing non-vab devices
 $ su -c cat /sdcard/boot.img > /dev/block/by-name/boot
