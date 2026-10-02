@@ -4,9 +4,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.tls.AdbTlsCertificate
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.io.EOFException
 import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -159,18 +159,22 @@ public class AdbPairingClient(
     }
 
     /**
-     * 通过 Conscrypt 反射获取 TLS Key Material
+     * 使用 HiddenApiBypass 反射获取 TLS Key Material
      */
     private fun exportKeyingMaterial(sslSocket: SSLSocket, label: String, length: Int): ByteArray {
         val conscryptClass = Class.forName("com.android.org.conscrypt.Conscrypt")
-        val exportMethod = conscryptClass.getMethod(
+        
+        // 静态方法调用：第一个参数为 null
+        // 依次传入签名：(Class, MethodName, args...)
+        return HiddenApiBypass.invoke(
+            conscryptClass,
+            null,
             "exportKeyingMaterial",
-            SSLSocket::class.java,
-            String::class.java,
-            ByteArray::class.java,
-            Int::class.javaPrimitiveType
-        )
-        return exportMethod.invoke(null, sslSocket, label, null, length) as ByteArray
+            sslSocket,
+            label,
+            null as ByteArray?,
+            length
+        ) as ByteArray
     }
 
     companion object {
