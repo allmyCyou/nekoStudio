@@ -19,8 +19,9 @@ public class AdbSpake2Engine(
 
     private val random = SecureRandom()
 
-    private val myNameBytes = "adb pair client\u0000".toByteArray(Charsets.UTF_8)
-    private val theirNameBytes = "adb pair server\u0000".toByteArray(Charsets.UTF_8)
+    // 移除末尾字符 '\u0000'，对齐 AOSP 定义
+    private val myNameBytes = "adb pair client".toByteArray(Charsets.UTF_8)
+    private val theirNameBytes = "adb pair server".toByteArray(Charsets.UTF_8)
 
     private val scalarX = ByteArray(32)
     private val scalarW = ByteArray(32)
@@ -90,9 +91,16 @@ public class AdbSpake2Engine(
         Arrays.fill(pointK, 0.toByte())
     }
 
+    // 符合 AOSP pairing_auth 规范的 IV 布局 (前4字节0，后8字节Little-Endian计数器)
+    private fun createIv(counter: Long): ByteArray {
+        val iv = ByteArray(12)
+        ByteBuffer.wrap(iv, 4, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(counter)
+        return iv
+    }
+
     public fun encryptPayload(plainData: ByteArray): ByteArray {
         val key = derivedSessionKey ?: throw IllegalStateException("会话密钥未建立")
-        val iv = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).putLong(encIv++).array()
+        val iv = createIv(encIv++)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
@@ -101,7 +109,7 @@ public class AdbSpake2Engine(
 
     public fun decryptPayload(encryptedData: ByteArray): ByteArray {
         val key = derivedSessionKey ?: throw IllegalStateException("会话密钥未建立")
-        val iv = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN).putLong(decIv++).array()
+        val iv = createIv(decIv++)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
@@ -117,14 +125,25 @@ public class AdbSpake2Engine(
 
     // --- 底层 LE 字节序 & 曲线点运算 ---
 
+    // 防止 BigInteger.toByteArray() 追加前导 0x00 导致的小端转置位移
+    private fun toLittleEndian32(bigInt: BigInteger): ByteArray {
+        val src = bigInt.toByteArray()
+        val out = ByteArray(32)
+        val start = if (src.isNotEmpty() && src[0] == 0.toByte()) 1 else 0
+        val len = src.size - start
+        for (i in 0 until minOf(len, 32)) {
+            out[i] = src[src.size - 1 - i]
+        }
+        return out
+    }
+
     private fun scReduce(input64: ByteArray, out32: ByteArray) {
         val bigInt = BigInteger(1, input64.reversedArray())
         val reduced = bigInt.mod(ED25519_L)
-        val leBytes = reduced.toByteArray().reversedArray()
+        val leBytes = toLittleEndian32(reduced)
 
         Arrays.fill(out32, 0.toByte())
-        val copyLen = minOf(leBytes.size, 32)
-        System.arraycopy(leBytes, 0, out32, 0, copyLen)
+        System.arraycopy(leBytes, 0, out32, 0, 32)
     }
 
     private fun scalarMultBase(scalar: ByteArray): ByteArray {
@@ -172,10 +191,7 @@ public class AdbSpake2Engine(
     }
 
     private fun encodeCurvePoint(point: SimpleECPoint): ByteArray {
-        val yBytes = point.y.toByteArray().reversedArray()
-        val result = ByteArray(32)
-        val copyLen = minOf(yBytes.size, 32)
-        System.arraycopy(yBytes, 0, result, 0, copyLen)
+        val result = toLittleEndian32(point.y)
         if (point.x.testBit(0)) {
             result[31] = (result[31].toInt() or 0x80).toByte()
         }
@@ -230,10 +246,10 @@ public class AdbSpake2Engine(
         private val D = BigInteger("-121665", 10).multiply(BigInteger("121666", 10).modInverse(P)).mod(P)
         private val I = BigInteger("2", 10).modPow(P.subtract(BigInteger.ONE).divide(BigInteger.valueOf(4)), P)
 
-        // 正确的 Ed25519 Base Point (Little-Endian Encoded)
-        private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666658")
+        // Ed25519 Base Point (Little-Endian Hex)
+        private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666666")
         
-        // AOSP 精确的 M 与 N 坐标点 Hex
+        // AOSP M 与 N 坐标点 Hex
         private val M_POINT_BYTES = hexToBytes("d75a980182b10ab7d54377c1139e3a706c4d24fe0c1d0b348e8ad8780b22c8d4")
         private val N_POINT_BYTES = hexToBytes("015708e23d49d748e129620a7195adb078a13f575d59a7622cd0146505c54383")
 

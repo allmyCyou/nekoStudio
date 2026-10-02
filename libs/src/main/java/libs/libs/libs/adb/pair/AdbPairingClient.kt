@@ -120,9 +120,6 @@ public class AdbPairingClient(
         }
     }
 
-    /**
-     * 发送 6 字节包头 (Version:1, Type:1, PayloadSize:4 Big-Endian) + Payload
-     */
     private fun sendPacket(outputStream: DataOutputStream, type: Byte, payload: ByteArray) {
         val buffer = ByteBuffer.allocate(6).order(ByteOrder.BIG_ENDIAN)
         buffer.put(HEADER_VERSION)
@@ -134,9 +131,6 @@ public class AdbPairingClient(
         outputStream.flush()
     }
 
-    /**
-     * 读取 6 字节包头 + Payload
-     */
     private fun receivePacket(inputStream: DataInputStream): Pair<Byte, ByteArray> {
         val headerBytes = ByteArray(6)
         inputStream.readFully(headerBytes)
@@ -158,14 +152,8 @@ public class AdbPairingClient(
         return Pair(type, payload)
     }
 
-    /**
-     * 使用 HiddenApiBypass 反射获取 TLS Key Material
-     */
     private fun exportKeyingMaterial(sslSocket: SSLSocket, label: String, length: Int): ByteArray {
         val conscryptClass = Class.forName("com.android.org.conscrypt.Conscrypt")
-        
-        // 静态方法调用：第一个参数为 null
-        // 依次传入签名：(Class, MethodName, args...)
         return HiddenApiBypass.invoke(
             conscryptClass,
             null,
@@ -185,6 +173,8 @@ public class AdbPairingClient(
         private const val HEADER_VERSION: Byte = 1
         private const val TYPE_SPAKE2_MSG: Byte = 0
         private const val TYPE_PEER_INFO: Byte = 1
-        private const val EXPORTED_KEY_LABEL = "adb-label"
+
+        // 定义符合规范的 TLS 导出 Label 字符串
+        private const val EXPORTED_KEY_LABEL = "adb pair tls key material"
     }
 }
