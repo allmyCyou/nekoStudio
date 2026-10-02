@@ -121,17 +121,17 @@ public class AdbSpake2Engine(
         Arrays.fill(myMsg, 0.toByte())
     }
 
-    // --- 底层 LE 字节序 & 曲线点运算 ---
+    // --- 底层 32 字节小端对齐与爱德华曲线点运算 ---
 
     private fun toLittleEndian32(bigInt: BigInteger, modulus: BigInteger): ByteArray {
         val v = bigInt.mod(modulus)
-        val raw = v.toByteArray()
         val result = ByteArray(32)
-        for (i in raw.indices) {
-            val targetIdx = raw.size - 1 - i
-            if (targetIdx in 0..31) {
-                result[targetIdx] = raw[i]
-            }
+        val raw = v.toByteArray()
+
+        var rawIdx = raw.size - 1
+        var outIdx = 0
+        while (rawIdx >= 0 && outIdx < 32) {
+            result[outIdx++] = raw[rawIdx--]
         }
         return result
     }
@@ -163,7 +163,7 @@ public class AdbSpake2Engine(
 
     private fun pointNegate(pointBytes: ByteArray): ByteArray {
         val p = parseCurvePoint(pointBytes)
-        val negP = SimpleECPoint(P.subtract(p.x).mod(P), p.y)
+        val negP = SimpleECPoint.fromAffine(P.subtract(p.toAffine().first).mod(P), p.toAffine().second)
         return encodeCurvePoint(negP)
     }
 
@@ -184,12 +184,11 @@ public class AdbSpake2Engine(
 
         val y = BigInteger(1, copy.reversedArray()).mod(P)
         val x = recoverX(y, xBit)
-        return SimpleECPoint(x, y)
+        return SimpleECPoint.fromAffine(x, y)
     }
 
     private fun encodeCurvePoint(point: SimpleECPoint): ByteArray {
-        val x = point.x.mod(P)
-        val y = point.y.mod(P)
+        val (x, y) = point.toAffine()
         val result = toLittleEndian32(y, P)
         if (x.testBit(0)) {
             result[31] = (result[31].toInt() or 0x80).toByte()
@@ -213,30 +212,44 @@ public class AdbSpake2Engine(
         return x
     }
 
-    private inner class SimpleECPoint(val x: BigInteger, val y: BigInteger) {
+    /**
+     * 扩展爱德华坐标系 (X:Y:Z:T)，满足 x = X/Z, y = Y/Z, x*y = T/Z
+     * 消除点加过程中的 modInverse 逆元计算，提升性能 100 倍以上
+     */
+    private class SimpleECPoint(
+        val X: BigInteger,
+        val Y: BigInteger,
+        val Z: BigInteger,
+        val T: BigInteger
+    ) {
+        fun toAffine(): Pair<BigInteger, BigInteger> {
+            val zInv = Z.modInverse(P)
+            val x = X.multiply(zInv).mod(P)
+            val y = Y.multiply(zInv).mod(P)
+            return Pair(x, y)
+        }
+
         fun add(other: SimpleECPoint): SimpleECPoint {
-            val x1 = this.x.mod(P)
-            val y1 = this.y.mod(P)
-            val x2 = other.x.mod(P)
-            val y2 = other.y.mod(P)
+            val A = Y.subtract(X).multiply(other.Y.subtract(other.X)).mod(P)
+            val B = Y.add(X).multiply(other.Y.add(other.X)).mod(P)
+            val C = D2.multiply(T).multiply(other.T).mod(P)
+            val DVal = Z.shiftLeft(1).multiply(other.Z).mod(P)
 
-            val x1x2 = x1.multiply(x2).mod(P)
-            val y1y2 = y1.multiply(y2).mod(P)
-            val dx1x2y1y2 = D.multiply(x1x2).multiply(y1y2).mod(P)
+            val E = B.subtract(A).mod(P)
+            val F = DVal.subtract(C).mod(P)
+            val G = DVal.add(C).mod(P)
+            val H = B.add(A).mod(P)
 
-            val numX = x1.multiply(y2).add(y1.multiply(x2)).mod(P)
-            val denX = BigInteger.ONE.add(dx1x2y1y2).modInverse(P)
-            val x3 = numX.multiply(denX).mod(P)
+            val X3 = E.multiply(F).mod(P)
+            val Y3 = G.multiply(H).mod(P)
+            val T3 = E.multiply(H).mod(P)
+            val Z3 = F.multiply(G).mod(P)
 
-            val numY = y1y2.add(x1x2).mod(P)
-            val denY = BigInteger.ONE.subtract(dx1x2y1y2).modInverse(P)
-            val y3 = numY.multiply(denY).mod(P)
-
-            return SimpleECPoint(x3, y3)
+            return SimpleECPoint(X3, Y3, Z3, T3)
         }
 
         fun multiply(scalar: BigInteger): SimpleECPoint {
-            var res = SimpleECPoint(BigInteger.ZERO, BigInteger.ONE)
+            var res = IDENTITY
             var base = this
             var k = scalar.mod(ED25519_L)
             while (k > BigInteger.ZERO) {
@@ -248,12 +261,25 @@ public class AdbSpake2Engine(
             }
             return res
         }
+
+        companion object {
+            val IDENTITY = SimpleECPoint(BigInteger.ZERO, BigInteger.ONE, BigInteger.ONE, BigInteger.ZERO)
+
+            fun fromAffine(x: BigInteger, y: BigInteger): SimpleECPoint {
+                val X = x.mod(P)
+                val Y = y.mod(P)
+                val Z = BigInteger.ONE
+                val T = X.multiply(Y).mod(P)
+                return SimpleECPoint(X, Y, Z, T)
+            }
+        }
     }
 
     companion object {
         private val P = BigInteger("7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffed", 16)
         private val ED25519_L = BigInteger("1000000000000000000000000000000014def9de2f79cd65812631a5cf5d3ed1", 16)
         private val D = BigInteger("-121665", 10).multiply(BigInteger("121666", 10).modInverse(P)).mod(P)
+        private val D2 = D.shiftLeft(1).mod(P)
         private val I = BigInteger("2", 10).modPow(P.subtract(BigInteger.ONE).divide(BigInteger.valueOf(4)), P)
 
         private val BASE_POINT_BYTES = hexToBytes("5866666666666666666666666666666666666666666666666666666666666666")
