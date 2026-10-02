@@ -1,13 +1,12 @@
 package libs.libs.libs.adb.key
 
 import org.bouncycastle.crypto.params.AsymmetricKeyParameter
-import org.bouncycastle.crypto.params.RSAKeyGenerationParameters
 import org.bouncycastle.crypto.params.RSAKeyParameters
 import org.bouncycastle.crypto.params.RSAPrivateCrtKeyParameters
+import org.bouncycastle.util.encoders.Base64
 import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Base64
 
 public object AdbKeyUtils {
 
@@ -40,9 +39,9 @@ public object AdbKeyUtils {
         buffer.put(toLittleEndianByteArray(rr, 256))
         buffer.putInt(e.toInt())
 
-        // 4. Base64 编码并拼接 comment (注意 Base64 与 Comment 之间必须有空格)
-        val base64Key = Base64.getEncoder().encodeToString(buffer.array())
-        return if (comment.isBlank()) base64Key else "$base64Key $comment"
+        // 4. Base64 编码并拼接 comment (使用 BC Base64 避免 Android API 版本兼容问题)
+        val base64Key = Base64.toBase64String(buffer.array())
+        return if (comment.isBlank()) base64Key else "$base64Key$comment"
     }
 
     /**
@@ -53,7 +52,7 @@ public object AdbKeyUtils {
         val base64Part = parts[0]
         val comment = if (parts.size > 1) parts[1] else ""
 
-        val bytes = Base64.getDecoder().decode(base64Part)
+        val bytes = Base64.decode(base64Part)
         require(bytes.size == 524) { "Invalid ADB public key structure length: ${bytes.size} (expected 524)" }
 
         val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
@@ -76,9 +75,6 @@ public object AdbKeyUtils {
         return Pair(RSAKeyParameters(false, modulus, exponent), comment)
     }
 
-    /**
-     * 从私钥参数中直接提取匹配的 RSA 公钥参数
-     */
     public fun extractPublicKeyParameters(privateKey: AsymmetricKeyParameter): RSAKeyParameters {
         return when (privateKey) {
             is RSAPrivateCrtKeyParameters -> RSAKeyParameters(false, privateKey.modulus, privateKey.publicExponent)

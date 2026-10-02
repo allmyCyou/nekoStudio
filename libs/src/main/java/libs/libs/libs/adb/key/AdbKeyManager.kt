@@ -32,9 +32,8 @@ public class AdbKeyManager(
 
     /**
      * 指定密钥存放目录并自动加载/初始化密钥。
-     * - 目录中存在 `adbkey` 时优先读取磁盘文件；
-     * - 目录中无密钥时，自动生成新密钥并持久化保存。
      */
+    @Synchronized
     public fun initFromDirectory(keyDir: File, comment: String = "adb@key"): AdbKeyPair {
         keyDir.mkdirs()
         val privFile = File(keyDir, "adbkey")
@@ -43,8 +42,9 @@ public class AdbKeyManager(
     }
 
     /**
-     * 核心加载逻辑：优先从磁盘读，读失败或不存在时才生成新密钥并存盘
+     * 核心加载逻辑：优先从磁盘读，读失败或文件损坏时才生成新密钥并存盘
      */
+    @Synchronized
     public fun loadOrGenerateKeys(
         privFile: File,
         pubFile: File,
@@ -81,11 +81,12 @@ public class AdbKeyManager(
     /**
      * 检查并确保密钥加载。如果未加载，优先根据配置的路径加载，无路径或不存在才生成。
      */
+    @Synchronized
     public fun ensureLoaded(comment: String = "adb@key") {
         if (isLoaded) return
 
         val privFile = privateKeyFile
-        val pubFile = publicKeyFile
+        val pubFile = publicKeyFile ?: privFile?.let { File(it.parentFile, "${it.name}.pub") }
 
         if (privFile != null && pubFile != null) {
             loadOrGenerateKeys(privFile, pubFile, comment)
@@ -95,29 +96,33 @@ public class AdbKeyManager(
     }
 
     /**
-     * 设置文件路径并自动加载；如果文件不存在则不加载，留给后续自动生成并保存
+     * 设置文件路径并自动加载；带文件损坏保护机制
      */
+    @Synchronized
     public fun setupFilesAndLoad(privFile: File, pubFile: File) {
         this.privateKeyFile = privFile
         this.publicKeyFile = pubFile
 
         if (privFile.exists() && privFile.length() > 0) {
-            val privPem = privFile.readText()
-            val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
-            loadKeys(privPem, pubStr)
+            try {
+                val privPem = privFile.readText()
+                val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
+                loadKeys(privPem, pubStr)
 
-            // 如果公钥文件缺失，自动根据私钥补充生成公钥文件
-            if (!pubFile.exists() || pubFile.length() == 0L) {
-                pubFile.parentFile?.mkdirs()
-                pubFile.writeText(getAdbPublicKeyString())
+                if (!pubFile.exists() || pubFile.length() == 0L) {
+                    pubFile.parentFile?.mkdirs()
+                    pubFile.writeText(getAdbPublicKeyString())
+                }
+            } catch (_: Exception) {
+                generateKeyPair()
             }
         }
     }
 
     /**
      * 生成全新 2048 位 RSA 密钥对。
-     * 若已配置 privateKeyFile 与 publicKeyFile，自动持久化保存至本地磁盘。
      */
+    @Synchronized
     public fun generateKeyPair(comment: String = "adb@key"): AdbKeyPair {
         val generator = RSAKeyPairGenerator()
         generator.init(
@@ -140,7 +145,6 @@ public class AdbKeyManager(
 
         val keyPair = AdbKeyPair(privKey, pubKeyParams, pubKeyStr)
 
-        // 绑定路径时自动写入磁盘
         privateKeyFile?.let { file ->
             file.parentFile?.mkdirs()
             file.writeText(keyPair.toPem())
@@ -153,6 +157,7 @@ public class AdbKeyManager(
         return keyPair
     }
 
+    @Synchronized
     public fun loadKeys(adbKeyPem: String, adbKeyPub: String? = null) {
         val privKey = AdbKeySerializer.privateKeyFromPem(adbKeyPem)
         val pubStr = if (!adbKeyPub.isNullOrBlank()) {

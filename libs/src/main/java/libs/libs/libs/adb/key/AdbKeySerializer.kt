@@ -13,9 +13,6 @@ import java.io.StringWriter
 
 public object AdbKeySerializer {
 
-    /**
-     * 将 BC 私钥对象导出为包含 -----BEGIN PRIVATE KEY----- 的 PKCS#8 PEM 格式文本 (`adbkey`)
-     */
     public fun privateKeyToPem(privateKey: AsymmetricKeyParameter): String {
         val stringWriter = StringWriter()
         PemWriter(stringWriter).use { pemWriter ->
@@ -25,15 +22,12 @@ public object AdbKeySerializer {
         return stringWriter.toString()
     }
 
-    /**
-     * 从 PEM 文本解析私钥，兼容 PKCS#8 ("PRIVATE KEY") 与 PKCS#1 ("RSA PRIVATE KEY")
-     */
     public fun privateKeyFromPem(pemString: String): AsymmetricKeyParameter {
         PemReader(StringReader(pemString)).use { pemReader ->
             val pemObject = pemReader.readPemObject()
                 ?: throw IllegalArgumentException("Invalid PEM format: empty or unparseable content")
 
-            return when (pemObject.type) {
+            return when (pemObject.type.trim().uppercase()) {
                 "PRIVATE KEY" -> PrivateKeyFactory.createKey(pemObject.content)
                 "RSA PRIVATE KEY" -> {
                     val rsa = RSAPrivateKey.getInstance(pemObject.content)
