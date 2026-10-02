@@ -17,6 +17,8 @@ import android.webkit.*
 import android.content.*
 import android.content.res.Configuration
 import android.hardware.usb.*
+import android.bluetooth.BluetoothAdapter
+import android.nfc.NfcAdapter
 
 import android.net.*
 import android.net.wifi.*
@@ -540,6 +542,8 @@ class MainActivity : ComponentActivity() {
             addAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED)
             addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
             addAction(WifiManager.WIFI_STATE_CHANGED_ACTION)
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+            addAction(NfcAdapter.ACTION_ADAPTER_STATE_CHANGED)
             addAction(Intent.ACTION_POWER_CONNECTED)
             addAction(Intent.ACTION_POWER_DISCONNECTED)
         }
@@ -610,6 +614,42 @@ class MainActivity : ComponentActivity() {
                         WifiManager.WIFI_STATE_DISABLED -> {
                             isWifiEnabled = false
                             appendLog("[Warn] ⏳ WLAN 已关闭")
+                        }
+                    }
+                }
+
+                BluetoothAdapter.ACTION_STATE_CHANGED -> {
+                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    when (state) {
+                        BluetoothAdapter.STATE_ON -> {
+                            appendLog("[INFO] 📶 蓝牙已开启")
+                        }
+                        BluetoothAdapter.STATE_OFF -> {
+                            appendLog("[Warn] 📶 蓝牙已关闭")
+                        }
+                        BluetoothAdapter.STATE_TURNING_ON -> {
+                            appendLog("[INFO] ⏳ 蓝牙开启中")
+                        }
+                        BluetoothAdapter.STATE_TURNING_OFF -> {
+                            appendLog("[INFO] ⏳ 蓝牙关闭中")
+                        }
+                    }
+                }
+
+                NfcAdapter.ACTION_ADAPTER_STATE_CHANGED -> {
+                    val state = intent.getIntExtra(NfcAdapter.EXTRA_ADAPTER_STATE, NfcAdapter.STATE_OFF)
+                    when (state) {
+                        NfcAdapter.STATE_ON -> {
+                            appendLog("[INFO] 💳 NFC 已开启")
+                        }
+                        NfcAdapter.STATE_OFF -> {
+                            appendLog("[Warn] 💳 NFC 已关闭")
+                        }
+                        NfcAdapter.STATE_TURNING_ON -> {
+                            appendLog("[INFO] ⏳ NFC 开启中")
+                        }
+                        NfcAdapter.STATE_TURNING_OFF -> {
+                            appendLog("[INFO] ⏳ NFC 关闭中")
                         }
                     }
                 }
