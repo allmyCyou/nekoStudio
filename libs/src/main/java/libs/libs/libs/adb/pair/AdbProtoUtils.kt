@@ -30,7 +30,7 @@ public object AdbProtoUtils {
     public fun decodePairingPacket(bytes: ByteArray): PairingPacket {
         if (bytes.isEmpty()) return PairingPacket()
         val input = ByteArrayInputStream(bytes)
-        var type = PairingPacket.Type.UNKNOWN 
+        var type = PairingPacket.Type.SPAKE2_MSG
         var payload = byteArrayOf()
 
         while (input.available() > 0) {
