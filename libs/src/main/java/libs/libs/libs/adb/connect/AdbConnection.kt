@@ -21,7 +21,6 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
     private val socket = AdbSocket()
     private val localIdGenerator = AtomicInteger(1)
     
-    // 底层 Socket 写入锁，保证并发 writePacket 时的字节流顺序完整
     private val writeMutex = Mutex()
 
     private val _state = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected)
@@ -32,10 +31,7 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
     private var _features: Set<String> = emptySet()
     public val features: Set<String> get() = _features
 
-    // 管理活动中的 Stream 映射表 (localId -> AdbStream)
     private val activeStreams = ConcurrentHashMap<Int, AdbStream>()
-    
-    // 监听 openStream 等待 RESP 的通道
     private val pendingOpenRequests = ConcurrentHashMap<Int, kotlinx.coroutines.channels.Channel<AdbPacket>>()
 
     private var dispatchJob: Job? = null
@@ -66,7 +62,7 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
             )
             sendPacket(cnxnPacket)
 
-            // 2. 握手 & RSA 鉴权阶段（此时尚未启动 Dispatcher，单线程同步读取）
+            // 2. 握手 & RSA 鉴权 / TLS 协商阶段
             var isHandshakeDone = false
             var sentPublicKey = false
 
@@ -80,6 +76,15 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
                         _features = parseFeatures(banner)
                         _state.value = AdbConnectionState.Connected(banner)
                         isHandshakeDone = true
+                    }
+
+                    AdbCommand.CMD_STLS -> {
+                        // 收到设备发来的 TLS 升级指令 (Android 11+ 无线调试)
+                        _state.value = AdbConnectionState.Authenticating
+                        socket.startTls(keyManager)
+                        
+                        // 完成 TLS 握手后，在 TLS 加密通道上重新发起 CNXN 协商
+                        sendPacket(cnxnPacket)
                     }
 
                     AdbCommand.CMD_AUTH -> {
@@ -127,9 +132,6 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
         }
     }
 
-    /**
-     * 中央包解复发器：单协程轮询 Socket 并将包分发到对应的 Stream
-     */
     private fun startDispatchLoop() {
         dispatchJob?.cancel()
         dispatchJob = connectionScope.launch {
@@ -138,19 +140,16 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
                     val packet = socket.readPacket()
                     val targetLocalId = packet.arg1
 
-                    // A. 处理等待 openStream 的响应包 (CMD_OKAY / CMD_CLSE)
                     val pendingChannel = pendingOpenRequests[targetLocalId]
                     if (pendingChannel != null) {
                         pendingChannel.send(packet)
                         continue
                     }
 
-                    // B. 处理已知活动 Stream 的数据包
                     val stream = activeStreams[targetLocalId]
                     if (stream != null) {
                         when (packet.command) {
                             AdbCommand.CMD_OKAY -> {
-                                // 收到写确认 ACK，通知 AdbStream.write() 继续
                                 stream.writeAckChannel.trySend(Unit)
                             }
                             AdbCommand.CMD_WRTE, AdbCommand.CMD_CLSE -> {
@@ -160,7 +159,6 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
                     }
                 }
             } catch (e: Exception) {
-                // Socket 发生断开或重置，关闭所有关联 Stream
                 activeStreams.values.forEach { it.closeInternal() }
                 activeStreams.clear()
                 _state.value = AdbConnectionState.Disconnected
@@ -178,9 +176,6 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
             .toSet()
     }
 
-    /**
-     * 打开指定的 ADB 服务通道
-     */
     public suspend fun openStream(destination: String): AdbStream? = withContext(Dispatchers.IO) {
         val localId = localIdGenerator.getAndIncrement()
 
@@ -197,14 +192,12 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
             payload = destBytes
         )
 
-        // 创建临时等待 Channel
         val openChannel = kotlinx.coroutines.channels.Channel<AdbPacket>(1)
         pendingOpenRequests[localId] = openChannel
 
         try {
             sendPacket(openPacket)
 
-            // 等待中央分发器投递 CMD_OKAY 或 CMD_CLSE
             val response = openChannel.receive()
 
             if (response.command == AdbCommand.CMD_OKAY) {
@@ -224,9 +217,6 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
         activeStreams.remove(localId)
     }
 
-    /**
-     * 线程安全的写包方法（受 Mutex 保护）
-     */
     public suspend fun sendPacket(packet: AdbPacket) = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             socket.writePacket(packet, skipChecksum = isSkipChecksum)
