@@ -957,24 +957,29 @@ class MainActivity : ComponentActivity() {
                     }
 
                     "pair" -> {
-                        // 支持 2 种格式:
-                        // 1. pair 10.45.16.152:42919 088758 (IP:PORT CODE)
-                        // 2. pair 10.45.16.152 42919 088758 (IP PORT CODE)
+                        // 支持的格式:
+                        // 1. pair 10.45.16.152:42919 088758 设备名
+                        // 2. pair 10.45.16.152 42919 088758 设备名
                         val host: String
                         val port: Int
                         val code: String
+                        var deviceName: String? = null
 
-                        if (tokens.size >= 4) {
-                            host = tokens[1]
-                            port = tokens[2].toIntOrNull() ?: 0
-                            code = tokens[3]
-                        } else if (tokens.size >= 3) {
+                        if (tokens.size >= 3 && tokens[1].contains(":")) {
+                            // IP:PORT 格式
                             val parts = tokens[1].split(":")
                             host = parts[0]
                             port = parts.getOrNull(1)?.toIntOrNull() ?: 0
                             code = tokens[2]
+                            deviceName = tokens.getOrNull(3) // 可选的第4个参数
+                        } else if (tokens.size >= 4) {
+                            // IP PORT CODE 格式
+                            host = tokens[1]
+                            port = tokens[2].toIntOrNull() ?: 0
+                            code = tokens[3]
+                            deviceName = tokens.getOrNull(4) // 可选的第5个参数
                         } else {
-                            appendLog("[error] 配对参数格式错误，例: pair 10.45.16.152:42919 088758")
+                            appendLog("[error] 配对参数格式错误，例: pair 10.45.16.152:42919 088758 设备名")
                             return@launch
                         }
 
@@ -983,10 +988,11 @@ class MainActivity : ComponentActivity() {
                             return@launch
                         }
 
-                        appendLog("[info] 正在配对 $host:$port ($code)...")
+                        val nameLog = if (!deviceName.isNullOrBlank()) " 名称: $deviceName" else ""
+                        appendLog("[info] 正在配对 $host:$port ($code)$nameLog")
 
-                        // 必须处理 pair 返回的 Result<String>
-                        val pairResult = client.pair(host, port, code)
+                        // 传入可选的 deviceName 参数
+                        val pairResult = client.pair(host, port, code, deviceName = deviceName)
                         pairResult.onSuccess { msg ->
                             appendLog("[success] 配对成功: $msg")
                         }.onFailure { e ->

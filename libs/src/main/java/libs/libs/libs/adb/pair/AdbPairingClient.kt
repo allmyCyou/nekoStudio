@@ -24,10 +24,14 @@ public class AdbPairingClient(
     private val keyManager: AdbKeyManager
 ) : AdbPairing {
 
+    /**
+     * @param deviceName 自定义设备名称，为空则使用 KeyManager 当前已加载的名称
+     */
     override suspend fun pair(
         host: String,
         port: Int,
         pairingCode: String,
+        deviceName: String? = null,
         listener: AdbPairingListener?
     ): Boolean = withContext(Dispatchers.IO) {
         try {
@@ -38,6 +42,11 @@ public class AdbPairingClient(
             }
             require(keyManager.isLoaded) {
                 "AdbKeyManager must load or generate key pair before pairing."
+            }
+
+            // 如果传入了新设备名，在发起配对前实时更新密钥名称
+            if (!deviceName.isNullOrBlank()) {
+                keyManager.updateDeviceName(deviceName)
             }
 
             Socket().use { rawSocket ->

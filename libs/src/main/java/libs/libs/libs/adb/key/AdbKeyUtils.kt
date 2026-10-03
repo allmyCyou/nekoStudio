@@ -18,7 +18,7 @@ public object AdbKeyUtils {
      */
     public fun convertToAdbPublicKeyString(
         pubKeyParams: RSAKeyParameters,
-        comment: String = "adb@key"
+        comment: String = "nekoStudio@adbd"
     ): String {
         val n = pubKeyParams.modulus
         val e = pubKeyParams.exponent
@@ -39,9 +39,10 @@ public object AdbKeyUtils {
         buffer.put(toLittleEndianByteArray(rr, 256))
         buffer.putInt(e.toInt())
 
-        // 4. Base64 编码并拼接 comment (使用 BC Base64 避免 Android API 版本兼容问题)
+        // 4. Base64 编码并拼接 comment (必须加上空格隔开)
         val base64Key = Base64.toBase64String(buffer.array())
-        return if (comment.isBlank()) base64Key else "$base64Key$comment"
+        val trimmedComment = comment.trim()
+        return if (trimmedComment.isBlank()) base64Key else "$base64Key$trimmedComment"
     }
 
     /**

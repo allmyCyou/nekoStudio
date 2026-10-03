@@ -80,10 +80,11 @@ public class AdbClient(
         host: String,
         port: Int,
         pairingCode: String,
+        deviceName: String? = null,
         listener: AdbPairingListener? = null
     ): Result<String> {
         ensureKeyLoaded()
-        return pairingManager.pairWithResult(host, port, pairingCode)
+        return pairingManager.pairWithResult(host, port, pairingCode, deviceName, listener)
     }
 
     /**
@@ -93,10 +94,11 @@ public class AdbClient(
         host: String,
         port: Int,
         pairingCode: String,
+        deviceName: String? = null,
         listener: AdbPairingListener? = null
     ): Result<Boolean> = runCatching {
         ensureKeyLoaded()
-        pairingManager.pair(host, port, pairingCode, listener)
+        pairingManager.pair(host, port, pairingCode, deviceName, listener)
     }
 
     /**
