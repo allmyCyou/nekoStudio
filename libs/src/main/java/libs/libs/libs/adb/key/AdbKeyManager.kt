@@ -34,7 +34,7 @@ public class AdbKeyManager(
      * 指定密钥存放目录并自动加载/初始化密钥。
      */
     @Synchronized
-    public fun initFromDirectory(keyDir: File, comment: String = "\u0000nekoStudio@adbd"): AdbKeyPair {
+    public fun initFromDirectory(keyDir: File, comment: String = "nekoStudio@adbd"): AdbKeyPair {
         keyDir.mkdirs()
         val privFile = File(keyDir, "adbkey")
         val pubFile = File(keyDir, "adbkey.pub")
@@ -48,7 +48,7 @@ public class AdbKeyManager(
     public fun loadOrGenerateKeys(
         privFile: File,
         pubFile: File,
-        comment: String = "\u0000nekoStudio@adbd"
+        comment: String = "nekoStudio@adbd"
     ): AdbKeyPair {
         this.privateKeyFile = privFile
         this.publicKeyFile = pubFile
@@ -82,7 +82,7 @@ public class AdbKeyManager(
      * 检查并确保密钥加载。如果未加载，优先根据配置的路径加载，无路径或不存在才生成。
      */
     @Synchronized
-    public fun ensureLoaded(comment: String = "\u0000nekoStudio@adbd") {
+    public fun ensureLoaded(comment: String = "nekoStudio@adbd") {
         if (isLoaded) return
 
         val privFile = privateKeyFile
@@ -123,7 +123,7 @@ public class AdbKeyManager(
      * 生成全新 2048 位 RSA 密钥对。
      */
     @Synchronized
-    public fun generateKeyPair(comment: String = "\u0000nekoStudio@adbd"): AdbKeyPair {
+    public fun generateKeyPair(comment: String = "nekoStudio@adbd"): AdbKeyPair {
         val generator = RSAKeyPairGenerator()
         generator.init(
             RSAKeyGenerationParameters(
