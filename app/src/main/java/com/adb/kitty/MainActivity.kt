@@ -19,6 +19,7 @@ import android.content.res.Configuration
 import android.hardware.usb.*
 import android.bluetooth.BluetoothAdapter
 import android.nfc.NfcAdapter
+import android.location.LocationManager
 
 import android.net.*
 import android.net.wifi.*
@@ -535,7 +536,6 @@ class MainActivity : ComponentActivity() {
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
         // 除非 Activity 销毁，否则不允许注销，这是预期行为，如果被注销则破坏整体逻辑，破坏等于重写整个应用的所有逻辑
-        // 其余系统广播合一注册（RECEIVER_EXPORTED）
         val systemIntentFilter = IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
             addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
@@ -546,13 +546,46 @@ class MainActivity : ComponentActivity() {
             addAction(NfcAdapter.ACTION_ADAPTER_STATE_CHANGED)
             addAction(Intent.ACTION_POWER_CONNECTED)
             addAction(Intent.ACTION_POWER_DISCONNECTED)
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_LOCALE_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+            addAction(Intent.ACTION_HEADSET_PLUG)
+            addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+            addAction(LocationManager.PROVIDERS_CHANGED_ACTION)
+            addAction(Intent.ACTION_AIRPLANE_MODE_CHANGED)
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+        }
+        val mediaFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_MEDIA_MOUNTED)
+            addDataScheme("file")
+        }
+        val packageFilter = IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED)
+            addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED)
+            addDataScheme("package")
         }
 
         ContextCompat.registerReceiver(
             this,
             systemReceiver,
             systemIntentFilter,
-            ContextCompat.RECEIVER_EXPORTED
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        ContextCompat.registerReceiver(
+            this,
+            systemReceiver,
+            mediaFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        ContextCompat.registerReceiver(
+            this,
+            systemReceiver,
+            packageFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
         )
     }
 
@@ -660,6 +693,82 @@ class MainActivity : ComponentActivity() {
 
                 Intent.ACTION_POWER_DISCONNECTED -> {
                     appendLog("[Warn] 🔋 充电器已拔出")
+                }
+
+                Intent.ACTION_TIME_CHANGED -> {
+                    appendLog("[INFO] ⏰ 系统时间被修改")
+                }
+  
+                Intent.ACTION_LOCALE_CHANGED -> {
+                    appendLog("[INFO] 🌐 系统语言/区域变更")
+                }
+
+                Intent.ACTION_TIMEZONE_CHANGED -> {
+                    val tz = intent.getStringExtra("time-zone")
+                    appendLog("[INFO] 🌐 时区变更: $tz")
+                }
+
+                Intent.ACTION_HEADSET_PLUG -> {
+                    val state = intent.getIntExtra("state", -1)
+                    if (state == 1) {
+                        appendLog("[INFO] 🎧 有线耳机已插入")
+                    } else if (state == 0) {
+                        appendLog("[Warn] 🎧 有线耳机已拔出")
+                    }
+                }
+
+                AudioManager.ACTION_AUDIO_BECOMING_NOISY -> {
+                    // 耳机拔出/蓝牙断开导致音频即将外放，音乐播放器应在此暂停播放
+                    appendLog("[Warn] 🔊 音频输出设备断开，暂停播放")
+                }
+
+                LocationManager.PROVIDERS_CHANGED_ACTION -> {
+                    val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+                    val isGpsOn = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                    appendLog("[INFO] 📍 定位服务状态变化，GPS启用: $isGpsOn")
+                }
+ 
+                Intent.ACTION_AIRPLANE_MODE_CHANGED -> {
+                    val isAirplaneOn = intent.getBooleanExtra("state", false)
+                    appendLog("[INFO] ✈️ 飞行模式: $isAirplaneOn")
+                }
+
+                Intent.ACTION_SCREEN_ON -> {
+                    appendLog("[INFO] 💡 屏幕点亮")
+                }
+
+                Intent.ACTION_SCREEN_OFF -> {
+                    appendLog("[Warn] 💡 屏幕熄灭")
+                }
+
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
+                    val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    appendLog("[INFO] 💤 Doze低电耗模式切换: ${pm.isDeviceIdleMode}")
+                }
+
+                PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> {
+                    val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                    appendLog("[INFO] 🔋 省电模式切换: ${pm.isPowerSaveMode}")
+                }
+
+                Intent.ACTION_MEDIA_MOUNTED -> {
+                    val path = intent.data?.path
+                    appendLog("[INFO] 💾 存储设备已挂载: $path")
+                }
+
+                Intent.ACTION_PACKAGE_ADDED -> {
+                    val packageName = intent.data?.schemeSpecificPart
+                    appendLog("[INFO] 📦 应用安装: $packageName")
+                }
+
+                Intent.ACTION_PACKAGE_REMOVED -> {
+                    val packageName = intent.data?.schemeSpecificPart
+                    appendLog("[Warn] 📦 应用卸载: $packageName")
+                }
+
+                Intent.ACTION_PACKAGE_REPLACED -> {
+                    val packageName = intent.data?.schemeSpecificPart
+                    appendLog("[INFO] 📦 应用更新: $packageName")
                 }
             }
         }
