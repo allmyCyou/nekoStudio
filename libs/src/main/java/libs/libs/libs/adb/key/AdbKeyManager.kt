@@ -34,7 +34,7 @@ public class AdbKeyManager(
      * 指定密钥存放目录并自动加载/初始化密钥。
      */
     @Synchronized
-    public fun initFromDirectory(keyDir: File, comment: String = "nekoStudio@adbd"): AdbKeyPair {
+    public fun initFromDirectory(keyDir: File, comment: String = "adb@key"): AdbKeyPair {
         keyDir.mkdirs()
         val privFile = File(keyDir, "adbkey")
         val pubFile = File(keyDir, "adbkey.pub")
@@ -48,7 +48,7 @@ public class AdbKeyManager(
     public fun loadOrGenerateKeys(
         privFile: File,
         pubFile: File,
-        comment: String = "nekoStudio@adbd"
+        comment: String = "adb@key"
     ): AdbKeyPair {
         this.privateKeyFile = privFile
         this.publicKeyFile = pubFile
@@ -58,7 +58,7 @@ public class AdbKeyManager(
                 val privPem = privFile.readText()
                 val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
                 
-                loadKeys(privPem, pubStr, comment)
+                loadKeys(privPem, pubStr)
 
                 // 自动补齐丢失的公钥文件
                 if (!pubFile.exists() || pubFile.length() == 0L) {
@@ -82,7 +82,7 @@ public class AdbKeyManager(
      * 检查并确保密钥加载。如果未加载，优先根据配置的路径加载，无路径或不存在才生成。
      */
     @Synchronized
-    public fun ensureLoaded(comment: String = "nekoStudio@adbd") {
+    public fun ensureLoaded(comment: String = "adb@key") {
         if (isLoaded) return
 
         val privFile = privateKeyFile
@@ -99,7 +99,7 @@ public class AdbKeyManager(
      * 设置文件路径并自动加载；带文件损坏保护机制
      */
     @Synchronized
-    public fun setupFilesAndLoad(privFile: File, pubFile: File, comment: String = "nekoStudio@adbd") {
+    public fun setupFilesAndLoad(privFile: File, pubFile: File) {
         this.privateKeyFile = privFile
         this.publicKeyFile = pubFile
 
@@ -107,14 +107,14 @@ public class AdbKeyManager(
             try {
                 val privPem = privFile.readText()
                 val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
-                loadKeys(privPem, pubStr, comment)
+                loadKeys(privPem, pubStr)
 
                 if (!pubFile.exists() || pubFile.length() == 0L) {
                     pubFile.parentFile?.mkdirs()
                     pubFile.writeText(getAdbPublicKeyString())
                 }
             } catch (_: Exception) {
-                generateKeyPair(comment)
+                generateKeyPair()
             }
         }
     }
@@ -123,7 +123,7 @@ public class AdbKeyManager(
      * 生成全新 2048 位 RSA 密钥对。
      */
     @Synchronized
-    public fun generateKeyPair(comment: String = "nekoStudio@adbd"): AdbKeyPair {
+    public fun generateKeyPair(comment: String = "adb@key"): AdbKeyPair {
         val generator = RSAKeyPairGenerator()
         generator.init(
             RSAKeyGenerationParameters(
@@ -158,33 +158,16 @@ public class AdbKeyManager(
     }
 
     @Synchronized
-    public fun loadKeys(adbKeyPem: String, adbKeyPub: String? = null, defaultComment: String = "nekoStudio@adbd") {
+    public fun loadKeys(adbKeyPem: String, adbKeyPub: String? = null) {
         val privKey = AdbKeySerializer.privateKeyFromPem(adbKeyPem)
         val pubStr = if (!adbKeyPub.isNullOrBlank()) {
             adbKeyPub.trim()
         } else {
             val pubParams = AdbKeyUtils.extractPublicKeyParameters(privKey)
-            AdbKeyUtils.convertToAdbPublicKeyString(pubParams, defaultComment)
+            AdbKeyUtils.convertToAdbPublicKeyString(pubParams)
         }
         this.privateKey = privKey
         this.publicKeyString = pubStr
-    }
-
-    /**
-     * 更新设备标识名称（无需重新生成私钥）
-     */
-    @Synchronized
-    public fun updateDeviceName(deviceName: String) {
-        val privKey = privateKey ?: throw IllegalStateException("PrivateKey is not loaded")
-        val pubParams = AdbKeyUtils.extractPublicKeyParameters(privKey)
-        val newPubStr = AdbKeyUtils.convertToAdbPublicKeyString(pubParams, deviceName)
-
-        this.publicKeyString = newPubStr
-
-        publicKeyFile?.let { file ->
-            file.parentFile?.mkdirs()
-            file.writeText(newPubStr)
-        }
     }
 
     public fun signToken(token: ByteArray): ByteArray {

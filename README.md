@@ -10,6 +10,19 @@
 - [x] ROOT
 - [x] Shell
 - [ ] adb
+  - [x] pair
+  - [ ] connect
+  - [ ] disconnect
+  - [ ] shell
+  - [ ] root
+  - [ ] unroot
+  - [ ] install
+  - [ ] uninstall
+  - [ ] push
+  - [ ] pull
+  - [ ] reboot
+  - [ ] usb
+  - [ ] sideload
 - [x] fastboot
 - [x] fastbootd
 - [ ] adb sideload
