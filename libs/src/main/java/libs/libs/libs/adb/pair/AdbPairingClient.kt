@@ -15,6 +15,7 @@ import java.nio.ByteOrder
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.Arrays
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
@@ -72,50 +73,51 @@ public class AdbPairingClient(
                 sslSocket.use { tlsSocket ->
                     tlsSocket.startHandshake()
 
-                    // 2. 导出 Keying Material 并组合配对密码
-                    val keyMaterial = exportKeyingMaterial(tlsSocket, EXPORTED_KEY_LABEL, 64)
+                    // 2. 导出 Keying Material 并组合配对密码 (要求 label 为 "adb-label\0"，长度 64 字节)
+                    val keyMaterial = exportKeyingMaterial(tlsSocket, EXPORTED_KEY_LABEL, EXPORT_KEY_SIZE)
                     val rawCodeBytes = pairingCode.toByteArray(Charsets.UTF_8)
                     val fullPassword = ByteArray(rawCodeBytes.size + keyMaterial.size)
                     System.arraycopy(rawCodeBytes, 0, fullPassword, 0, rawCodeBytes.size)
                     System.arraycopy(keyMaterial, 0, fullPassword, rawCodeBytes.size, keyMaterial.size)
 
-                    val spake2Engine = AdbSpake2Engine(fullPassword)
+                    try {
+                        AdbSpake2Engine(fullPassword).use { spake2Engine ->
+                            val inputStream = DataInputStream(tlsSocket.inputStream)
+                            val outputStream = DataOutputStream(tlsSocket.outputStream)
 
-                    val inputStream = DataInputStream(tlsSocket.inputStream)
-                    val outputStream = DataOutputStream(tlsSocket.outputStream)
+                            // 3. 发送 SPAKE2 Client Hello (PacketType = 0)
+                            val clientHello = spake2Engine.generateClientHello()
+                            sendPacket(outputStream, PairingPacket.Type.SPAKE2_MSG, clientHello)
 
-                    // 3. 发送 SPAKE2 Client Hello (PacketType = 0)
-                    val clientHello = spake2Engine.generateClientHello()
-                    sendPacket(outputStream, PairingPacket.Type.SPAKE2_MSG, clientHello)
+                            // 4. 接收 SPAKE2 Server Hello (PacketType = 0)
+                            val serverHelloPacket = receivePacket(inputStream)
+                            require(serverHelloPacket.type == PairingPacket.Type.SPAKE2_MSG) {
+                                "Expected SPAKE2_MSG (0), got: ${serverHelloPacket.type}"
+                            }
 
-                    // 4. 接收 SPAKE2 Server Hello (PacketType = 0)
-                    val serverHelloPacket = receivePacket(inputStream)
-                    require(serverHelloPacket.type == PairingPacket.Type.SPAKE2_MSG) {
-                        "Expected SPAKE2_MSG (0), got: ${serverHelloPacket.type}"
+                            spake2Engine.processServerHelloAndDeriveKey(serverHelloPacket.payload)
+
+                            // 5. 构造 8192 字节 Client PeerInfo 并通过 AES-128-GCM 加密发送
+                            val pubKeyStr = keyManager.getAdbPublicKeyString().trim() + "\n"
+                            val clientPeerInfoBytes = AdbProtoUtils.createClientPeerInfo(pubKeyStr)
+                            val encryptedPeerInfo = spake2Engine.encryptPayload(clientPeerInfoBytes)
+                            sendPacket(outputStream, PairingPacket.Type.PEER_INFO, encryptedPeerInfo)
+
+                            // 6. 接收并解密 Server PeerInfo 响应 (8208 字节：8192 字节 payload + 16 字节 GCM Auth Tag)
+                            val respPacket = receivePacket(inputStream)
+                            require(respPacket.type == PairingPacket.Type.PEER_INFO) {
+                                "Expected PEER_INFO (1), got: ${respPacket.type}"
+                            }
+
+                            val decryptedResponse = spake2Engine.decryptPayload(respPacket.payload)
+                            val serverPeerInfoStr = AdbProtoUtils.parseServerPeerInfo(decryptedResponse)
+
+                            listener?.onPairingSuccess(serverPeerInfoStr)
+                            true
+                        }
+                    } finally {
+                        Arrays.fill(fullPassword, 0.toByte())
                     }
-                    require(serverHelloPacket.payload.size == 32) {
-                        "Server Hello 长度不符: ${serverHelloPacket.payload.size}"
-                    }
-
-                    spake2Engine.processServerHelloAndDeriveKey(serverHelloPacket.payload)
-
-                    // 5. 构造 8192 字节 Client PeerInfo 并通过 AES-GCM 加密发送
-                    val pubKeyStr = keyManager.getAdbPublicKeyString().trim() + "\n"
-                    val clientPeerInfoBytes = AdbProtoUtils.createClientPeerInfo(pubKeyStr)
-                    val encryptedPeerInfo = spake2Engine.encryptPayload(clientPeerInfoBytes)
-                    sendPacket(outputStream, PairingPacket.Type.PEER_INFO, encryptedPeerInfo)
-
-                    // 6. 接收并解密 Server PeerInfo 响应 (8208 字节)
-                    val respPacket = receivePacket(inputStream)
-                    require(respPacket.type == PairingPacket.Type.PEER_INFO) {
-                        "Expected PEER_INFO (1), got: ${respPacket.type}"
-                    }
-
-                    val decryptedResponse = spake2Engine.decryptPayload(respPacket.payload)
-                    val serverPeerInfoStr = AdbProtoUtils.parseServerPeerInfo(decryptedResponse)
-
-                    listener?.onPairingSuccess(serverPeerInfoStr)
-                    true
                 }
             }
         } catch (e: Exception) {
@@ -125,7 +127,7 @@ public class AdbPairingClient(
     }
 
     private fun sendPacket(outputStream: DataOutputStream, type: Int, payload: ByteArray) {
-        val buffer = ByteBuffer.allocate(6).order(ByteOrder.BIG_ENDIAN)
+        val buffer = ByteBuffer.allocate(HEADER_SIZE).order(ByteOrder.BIG_ENDIAN)
         buffer.put(HEADER_VERSION)
         buffer.put(type.toByte())
         buffer.putInt(payload.size)
@@ -136,7 +138,7 @@ public class AdbPairingClient(
     }
 
     private fun receivePacket(inputStream: DataInputStream): PairingPacket {
-        val headerBytes = ByteArray(6)
+        val headerBytes = ByteArray(HEADER_SIZE)
         inputStream.readFully(headerBytes)
 
         val buffer = ByteBuffer.wrap(headerBytes).order(ByteOrder.BIG_ENDIAN)
@@ -147,7 +149,7 @@ public class AdbPairingClient(
         if (version != HEADER_VERSION) {
             throw IOException("Unsupported pairing packet version: $version")
         }
-        if (payloadSize <= 0 || payloadSize > 65536) {
+        if (payloadSize <= 0 || payloadSize > MAX_PAYLOAD_SIZE) {
             throw IOException("Invalid payload size: $payloadSize")
         }
 
@@ -162,7 +164,7 @@ public class AdbPairingClient(
         } catch (e: ClassNotFoundException) {
             Class.forName("org.conscrypt.Conscrypt")
         }
-    
+
         val method = HiddenApiBypass.getDeclaredMethod(
             conscryptClass,
             "exportKeyingMaterial",
@@ -171,9 +173,7 @@ public class AdbPairingClient(
             ByteArray::class.java,
             Int::class.javaPrimitiveType
         )
-        
-        // 关键修复：第 3 个参数 context 必须传入 null (使用 null as ByteArray? 防止反射类型歧义)
-        // 这样 Conscrypt 才会将 use_context 设为 0，与 AOSP ADB 服务端一致
+
         return method.invoke(null, sslSocket, label, null as ByteArray?, length) as ByteArray
     }
 
@@ -183,6 +183,11 @@ public class AdbPairingClient(
         private const val KEY_PASSWORD = "adb_pair_password"
 
         private const val HEADER_VERSION: Byte = 1
-        private const val EXPORTED_KEY_LABEL = "adb pair tls key material"
+        private const val HEADER_SIZE = 6
+        private const val MAX_PAYLOAD_SIZE = 2 * PeerInfo.MAX_PEER_INFO_SIZE // 16384 Bytes
+
+        // 关键对齐：AOSP 标准定义为 "adb-label\0"，长度为 64 字节
+        private const val EXPORTED_KEY_LABEL = "adb-label\u0000"
+        private const val EXPORT_KEY_SIZE = 64
     }
 }

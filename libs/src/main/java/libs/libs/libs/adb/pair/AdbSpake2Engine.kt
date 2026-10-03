@@ -33,13 +33,11 @@ public class AdbSpake2Engine(
     }
 
     public fun processServerHelloAndDeriveKey(serverHello: ByteArray) {
-        require(serverHello.size == 32) { "Server Hello 长度必须为 32 字节" }
-
         val keyMaterial = spake2Context.processMessage(serverHello)
             ?: throw IllegalStateException("SPAKE2 processMessage 失败，返回 null")
 
         try {
-            // 正确拼入 HKDF_INFO ("adb pairing_auth aes-128-gcm key")
+            // HKDF-SHA256 派生 AES-128 密钥 (Info: "adb pairing_auth aes-128-gcm key")
             val hkdf = HKDFBytesGenerator(SHA256Digest())
             hkdf.init(HKDFParameters(keyMaterial, null, HKDF_INFO))
             hkdf.generateBytes(derivedSessionKey, 0, derivedSessionKey.size)
@@ -69,6 +67,7 @@ public class AdbSpake2Engine(
 
     private fun createIv(counter: Long): ByteArray {
         val iv = ByteArray(12)
+        // GCM IV: 低 8 字节为 Little-Endian 编码的 uint64 计数器，高 4 字节为 0
         ByteBuffer.wrap(iv, 0, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(counter)
         return iv
     }
@@ -79,11 +78,11 @@ public class AdbSpake2Engine(
     }
 
     companion object {
-        // 关键点 1：带上 \u0000 保证 16 字节 C-Style 字符串格式
+        // C-Style 16 字节标识符，末尾带 \u0000
         private val CLIENT_NAME = "adb pair client\u0000".toByteArray(Charsets.UTF_8)
         private val SERVER_NAME = "adb pair server\u0000".toByteArray(Charsets.UTF_8)
 
-        // 关键点 2：HKDF 衍生密钥所需的 info 标识符
+        // HKDF 派生密钥 Info 标识符
         private val HKDF_INFO = "adb pairing_auth aes-128-gcm key".toByteArray(Charsets.UTF_8)
     }
 }
