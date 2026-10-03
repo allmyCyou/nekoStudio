@@ -7,6 +7,8 @@ plugins {
     alias(libs.plugins.kotlinx.serialization)
 }
 
+val libsNdk = libs.versions.android.ndk.version.get()
+val libsCmake = libs.versions.cmake.version.get()
 val libsCompileSdk = libs.versions.android.compileSdk.get().toInt()
 val libsMinSdk = libs.versions.android.minSdk.get().toInt()
 val libsBuildTools = libs.versions.android.buildTools.version.get()
@@ -15,6 +17,7 @@ android {
     namespace = "libs.libs.libs"
     compileSdk = libsCompileSdk
     buildToolsVersion = libsBuildTools
+    ndkVersion = libsNdk
 
     packaging {
         dex {
@@ -35,12 +38,27 @@ android {
         vectorDrawables { 
             useSupportLibrary = true
         }
+        ndk {
+            abiFilters.addAll(setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64", "riscv64"))
+        }
+        externalNativeBuild {
+            cmake {
+                abiFilters("arm64-v8a", "armeabi-v7a", "x86", "x86_64", "riscv64")
+            }
+        }
     }
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_25
         targetCompatibility = JavaVersion.VERSION_25
+    }
+
+    externalNativeBuild {
+        cmake {
+            path("src/main/cpp/CMakeLists.txt")
+            version = libsCmake
+        }
     }
 
     buildTypes {
@@ -78,5 +96,4 @@ dependencies {
     implementation(libs.androidx.annotation.experimental)
     implementation(libs.bcprov.jdk18on)
     implementation(libs.bcpkix.jdk18on)
-    implementation(libs.spake2.android)
 }
