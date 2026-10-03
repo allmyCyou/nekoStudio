@@ -8,8 +8,8 @@ android-compileSdk = "37"
 android-minSdk = "24"
 android-targetSdk = "37"
 
-android-versionCode = "29"
-android-versionPrefix = "4.7"
+android-versionCode = "30"
+android-versionPrefix = "4.8"
 
 android-ndk-version = "30.0.16248370"
 android-buildTools-version = "37.0.0"
@@ -23,6 +23,7 @@ window = "1.5.1"
 
 bc = "1.86"
 cye = "0.1.0"
+spake2 = "2.2.1"
 
 jdklibs = "2.1.5"
 libsuVersion = "6.0.0"
@@ -80,6 +81,9 @@ bcpkix-jdk18on = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bc
 
 ed25519-elisabeth = { module = "cafe.cryptography:ed25519-elisabeth", version.ref = "cye" }
 curve25519-elisabeth = { module = "cafe.cryptography:curve25519-elisabeth", version.ref = "cye" }
+
+# Spake2
+spake2-android = { module = "com.github.MuntashirAkon.spake2-java:spake2-android", version.ref = "spake2" }
 
 # Compose
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }

@@ -2,7 +2,7 @@ name: Auto Clean Workflow Runs
 
 on:
   schedule:
-    - cron: '27 19 */3 * *'
+    - cron: 27 19 */3 * *
   workflow_dispatch:
 
 jobs:
