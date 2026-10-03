@@ -9,14 +9,18 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.security.Principal
+import java.security.PrivateKey
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLEngine
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import javax.net.ssl.X509ExtendedKeyManager
 
 public class AdbSocket {
 
@@ -39,7 +43,7 @@ public class AdbSocket {
     }
 
     /**
-     * 将当前已连接的明文 Socket 原地升级为 TLS Socket (用于响应 CMD_STLS)
+     * 将当前已连接的明文 Socket 原地升级为 TLS Socket
      */
     public suspend fun startTls(keyManager: AdbKeyManager) = withContext(Dispatchers.IO) {
         val rawSocket = socket ?: throw IllegalStateException("Socket is not connected")
@@ -51,12 +55,16 @@ public class AdbSocket {
 
         val keyStore = KeyStore.getInstance("PKCS12").apply {
             load(null, null)
-            setKeyEntry("adb_client_key", keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
+            setKeyEntry(CLIENT_ALIAS, keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
         }
 
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
             init(keyStore, KEY_PASSWORD.toCharArray())
         }
+
+        // 获取原生的 KeyManager 并用强制选择 Alias 的包装类进行封装
+        val origKm = kmf.keyManagers.first { it is X509ExtendedKeyManager } as X509ExtendedKeyManager
+        val forceKm = ForceAliasKeyManager(origKm, CLIENT_ALIAS)
 
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
@@ -65,10 +73,9 @@ public class AdbSocket {
         })
 
         val sslContext = SSLContext.getInstance("TLSv1.3").apply {
-            init(kmf.keyManagers, trustAllCerts, SecureRandom())
+            init(arrayOf(forceKm), trustAllCerts, SecureRandom())
         }
 
-        // 在现有的 rawSocket 之上升级为 SSLSocket
         val ssl = sslContext.socketFactory.createSocket(
             rawSocket, host, port, true
         ) as SSLSocket
@@ -79,6 +86,36 @@ public class AdbSocket {
         this@AdbSocket.socket = ssl
         this@AdbSocket.inputStream = ssl.inputStream
         this@AdbSocket.outputStream = ssl.outputStream
+    }
+
+    /**
+     * 强制返回指定 Alias 的 KeyManager，防止 JSSE 因 Issuer 匹配失败导致 chooseClientAlias 返回 null
+     */
+    private class ForceAliasKeyManager(
+        private val delegate: X509ExtendedKeyManager,
+        private val alias: String
+    ) : X509ExtendedKeyManager() {
+
+        override fun chooseClientAlias(keyType: Array<out String>, issuers: Array<out Principal>?, socket: Socket?): String = alias
+
+        override fun chooseEngineClientAlias(keyType: Array<out String>, issuers: Array<out Principal>?, engine: SSLEngine?): String = alias
+
+        override fun getClientAliases(keyType: String, issuers: Array<out Principal>?): Array<String> = arrayOf(alias)
+
+        override fun getServerAliases(keyType: String, issuers: Array<out Principal>?): Array<String>? =
+            delegate.getServerAliases(keyType, issuers)
+
+        override fun chooseServerAlias(keyType: String, issuers: Array<out Principal>?, socket: Socket?): String? =
+            delegate.chooseServerAlias(keyType, issuers)
+
+        override fun chooseEngineServerAlias(keyType: String, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
+            delegate.chooseEngineServerAlias(keyType, issuers)
+
+        override fun getCertificateChain(alias: String): Array<out X509Certificate>? =
+            delegate.getCertificateChain(alias)
+
+        override fun getPrivateKey(alias: String): PrivateKey? =
+            delegate.getPrivateKey(alias)
     }
 
     /**
@@ -150,5 +187,6 @@ public class AdbSocket {
 
     companion object {
         private const val KEY_PASSWORD = "adb_tls_password"
+        private const val CLIENT_ALIAS = "adb_client_key"
     }
 }

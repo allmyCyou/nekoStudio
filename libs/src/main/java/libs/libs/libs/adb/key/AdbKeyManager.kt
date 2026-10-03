@@ -48,7 +48,7 @@ public class AdbKeyManager(
     public fun loadOrGenerateKeys(
         privFile: File,
         pubFile: File,
-        comment: String = "nekoStudio@adbd"
+        comment: String
     ): AdbKeyPair {
         this.privateKeyFile = privFile
         this.publicKeyFile = pubFile
@@ -123,7 +123,7 @@ public class AdbKeyManager(
      * 生成全新 2048 位 RSA 密钥对。
      */
     @Synchronized
-    public fun generateKeyPair(comment: String = "nekoStudio@adbd"): AdbKeyPair {
+    public fun generateKeyPair(comment: String): AdbKeyPair {
         val generator = RSAKeyPairGenerator()
         generator.init(
             RSAKeyGenerationParameters(
