@@ -92,3 +92,4 @@ Number of signers: 1
 - [android-sdk-aarch64](https://github.com/HomuHomu833/android-sdk-custom)
 - [android-ndk-aarch64](https://github.com/HomuHomu833/android-ndk-custom)
 - [MT-DocumentsProvider](https://github.com/L-JINBIN/MTDataFilesProvider)
+- [Spake2-android](https://github.com/MuntashirAkon/spake2-java)
