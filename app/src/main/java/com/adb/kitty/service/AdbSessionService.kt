@@ -54,7 +54,6 @@ import androidx.core.app.Person
 import androidx.core.app.RemoteInput
 import androidx.core.net.toUri
 import androidx.core.app.NotificationCompat
-import androidx.core.content.getSystemService
 import androidx.core.content.ContextCompat
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
@@ -285,7 +284,7 @@ class AdbSessionService : Service() {
     @SuppressLint("WakelockTimeout")
     private fun acquireWakeLock() {
         if (wakeLock == null || wakeLock?.isHeld == false) {
-            val pm = getSystemService<PowerManager>()
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
             wakeLock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "NekoStudio:RecordingWakeLock"

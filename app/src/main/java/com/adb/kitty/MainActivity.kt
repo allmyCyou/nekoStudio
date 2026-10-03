@@ -523,8 +523,8 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        
-        usbManager = getSystemService<UsbManager>()
+
+        usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
         ensureFlashDirExists()
         tryToStartService()
 
@@ -723,7 +723,8 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LocationManager.PROVIDERS_CHANGED_ACTION -> {
-                    val lm = context?.getSystemService<LocationManager>()
+                    val safeContext = context ?: return
+                    val lm = safeContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
                     val isGpsOn = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
                     appendLog("[INFO] 📍 定位服务状态变化，GPS启用: $isGpsOn")
                 }
@@ -742,12 +743,14 @@ class MainActivity : ComponentActivity() {
                 }
 
                 PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
-                    val pm = context?.getSystemService<PowerManager>()
+                    val safeContext = context ?: return
+                    val pm = safeContext.getSystemService(Context.LOCATION_SERVICE) as PowerManager
                     appendLog("[INFO] 💤 Doze低电耗模式切换: ${pm.isDeviceIdleMode}")
                 }
 
                 PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> {
-                    val pm = context?.getSystemService<PowerManager>()
+                    val safeContext = context ?: return
+                    val pm = safeContext.getSystemService(Context.LOCATION_SERVICE) as PowerManager
                     appendLog("[INFO] 🔋 省电模式切换: ${pm.isPowerSaveMode}")
                 }
 
