@@ -18,7 +18,7 @@ public object AdbKeyUtils {
      */
     public fun convertToAdbPublicKeyString(
         pubKeyParams: RSAKeyParameters,
-        comment: String = "\u0000adb@key"
+        comment: String = "\u0000nekoStudio@adbd"
     ): String {
         val n = pubKeyParams.modulus
         val e = pubKeyParams.exponent
