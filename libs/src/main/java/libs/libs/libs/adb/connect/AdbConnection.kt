@@ -79,11 +79,21 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
                     }
 
                     AdbCommand.CMD_STLS -> {
-                        // 收到设备发来的 TLS 升级指令 (Android 11+ 无线调试)
                         _state.value = AdbConnectionState.Authenticating
+
+                        // 1. 向 adbd 回复 CMD_STLS 确认包，通知对端切换至 TLS 模式
+                        val stlsResponsePacket = AdbPacket(
+                            command = AdbCommand.CMD_STLS,
+                            arg0 = response.arg0,
+                            arg1 = 0,
+                            payload = ByteArray(0)
+                        )
+                        sendPacket(stlsResponsePacket)
+
+                        // 2. 双方同步将 Socket 升级为 TLS 通道
                         socket.startTls(keyManager)
-                        
-                        // 完成 TLS 握手后，在 TLS 加密通道上重新发起 CNXN 协商
+
+                        // 3. 在 TLS 加密通道建立后，重新发送 CNXN 协商
                         sendPacket(cnxnPacket)
                     }
 

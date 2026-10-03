@@ -33,7 +33,8 @@ public class AdbPairingManager(
         val success = client.pair(host, port, pairingCode, object : AdbPairingListener {
             override fun onPairingStarted() {}
             override fun onPairingSuccess(peerPublicKey: String?) {
-                resultPubKey = peerPublicKey ?: keyManager.getAdbPublicKeyString()
+                // 明确区分，如果服务端没给就赋值 null 或给予准确标记，不要混淆为本地公钥
+                resultPubKey = peerPublicKey
             }
             override fun onPairingFailed(throwable: Throwable) {
                 error = throwable

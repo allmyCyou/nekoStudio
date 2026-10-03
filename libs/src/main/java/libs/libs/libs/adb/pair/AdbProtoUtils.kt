@@ -24,10 +24,15 @@ public object AdbProtoUtils {
             "Invalid PeerInfo length: expected ${PeerInfo.MAX_PEER_INFO_SIZE}, got ${decryptedData.size}"
         }
         val peerInfo = PeerInfo.fromByteArray(decryptedData)
-        
-        // 提取 C-Style 字符串并截断末尾 \0
+
         val rawString = String(peerInfo.data, StandardCharsets.UTF_8)
         val nullIndex = rawString.indexOf('\u0000')
-        return if (nullIndex >= 0) rawString.substring(0, nullIndex) else rawString
+        val parsedContent = if (nullIndex >= 0) rawString.substring(0, nullIndex) else rawString
+
+        return when (peerInfo.type) {
+            PeerInfo.ADB_RSA_PUB_KEY -> parsedContent
+            PeerInfo.ADB_DEVICE_GUID -> "GUID:$parsedContent"
+            else -> parsedContent
+        }
     }
 }
