@@ -84,7 +84,7 @@ public class AdbClient(
         listener: AdbPairingListener? = null
     ): Result<String> {
         ensureKeyLoaded()
-        return pairingManager.pairWithResult(host, port, pairingCode, deviceName, listener)
+        return pairingManager.pairWithResult(host, port, pairingCode, deviceName)
     }
 
     /**
