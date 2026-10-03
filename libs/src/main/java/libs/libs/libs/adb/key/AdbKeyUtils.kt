@@ -41,7 +41,7 @@ public object AdbKeyUtils {
 
         // 4. Base64 编码并拼接 comment (使用 BC Base64 避免 Android API 版本兼容问题)
         val base64Key = Base64.toBase64String(buffer.array())
-        return if (comment.isBlank()) base64Key else "$base64Key$comment"
+        return if (comment.isBlank()) base64Key else "$base64Key $comment"
     }
 
     /**

@@ -158,6 +158,7 @@ public class AdbPairingClient(
         return PairingPacket(type, payload)
     }
 
+    // 如果其他项目使用此项目中的adb库，需要注意，项目中已在 APP 模块中主动调用 HiddenApiBypass.setHiddenApiExemptions 来豁免系统类
     private fun exportKeyingMaterial(sslSocket: SSLSocket, label: String, length: Int): ByteArray {
         val conscryptClass = try {
             Class.forName("com.android.org.conscrypt.Conscrypt")
