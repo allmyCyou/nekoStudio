@@ -162,7 +162,7 @@ public class AdbPairingClient(
         } catch (e: ClassNotFoundException) {
             Class.forName("org.conscrypt.Conscrypt")
         }
-
+    
         val method = HiddenApiBypass.getDeclaredMethod(
             conscryptClass,
             "exportKeyingMaterial",
@@ -171,7 +171,10 @@ public class AdbPairingClient(
             ByteArray::class.java,
             Int::class.javaPrimitiveType
         )
-        return method.invoke(null, sslSocket, label, byteArrayOf(), length) as ByteArray
+        
+        // 关键修复：第 3 个参数 context 必须传入 null (使用 null as ByteArray? 防止反射类型歧义)
+        // 这样 Conscrypt 才会将 use_context 设为 0，与 AOSP ADB 服务端一致
+        return method.invoke(null, sslSocket, label, null as ByteArray?, length) as ByteArray
     }
 
     companion object {
