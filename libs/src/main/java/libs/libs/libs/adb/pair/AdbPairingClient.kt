@@ -157,7 +157,12 @@ public class AdbPairingClient(
     }
 
     private fun exportKeyingMaterial(sslSocket: SSLSocket, label: String, length: Int): ByteArray {
-        val conscryptClass = Class.forName("com.android.org.conscrypt.Conscrypt")
+        val conscryptClass = try {
+            Class.forName("com.android.org.conscrypt.Conscrypt")
+        } catch (e: ClassNotFoundException) {
+            Class.forName("org.conscrypt.Conscrypt")
+        }
+
         val method = HiddenApiBypass.getDeclaredMethod(
             conscryptClass,
             "exportKeyingMaterial",
@@ -166,7 +171,6 @@ public class AdbPairingClient(
             ByteArray::class.java,
             Int::class.javaPrimitiveType
         )
-        // 注意：第 3 个参数传入 byteArrayOf() 而非 null
         return method.invoke(null, sslSocket, label, byteArrayOf(), length) as ByteArray
     }
 
