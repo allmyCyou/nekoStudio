@@ -22,72 +22,68 @@ public class AdbSpake2Engine(
         SERVER_NAME
     )
 
-    private var derivedSessionKey: ByteArray? = null
+    private val derivedSessionKey = ByteArray(16)
+    private var isCipherInitialized = false
 
     private var encIv: Long = 0L
     private var decIv: Long = 0L
 
-    /**
-     * 调用 Native BoringSSL SPAKE2 生成 32 字节 Client Hello 报文
-     */
     public fun generateClientHello(): ByteArray {
         return spake2Context.generateMessage(passwordBytes)
     }
 
-    /**
-     * 处理 Server Hello 报文并导出 AES-128 会话密钥
-     */
     public fun processServerHelloAndDeriveKey(serverHello: ByteArray) {
         require(serverHello.size == 32) { "Server Hello 长度必须为 32 字节" }
 
-        // 1. 调用 Native SPAKE2 计算 64 字节 Key Material
         val keyMaterial = spake2Context.processMessage(serverHello)
+            ?: throw IllegalStateException("SPAKE2 processMessage 失败，返回 null")
 
         try {
-            // 2. 通过 HKDF-SHA256 衍生出 16 字节 AES-128 会话密钥
+            // 正确拼入 HKDF_INFO ("adb pairing_auth aes-128-gcm key")
             val hkdf = HKDFBytesGenerator(SHA256Digest())
-            hkdf.init(HKDFParameters(keyMaterial, null, null))
-            val secretKey = ByteArray(16)
-            hkdf.generateBytes(secretKey, 0, 16)
-
-            this.derivedSessionKey = secretKey
+            hkdf.init(HKDFParameters(keyMaterial, null, HKDF_INFO))
+            hkdf.generateBytes(derivedSessionKey, 0, derivedSessionKey.size)
+            isCipherInitialized = true
         } finally {
             Arrays.fill(keyMaterial, 0.toByte())
         }
     }
 
     public fun encryptPayload(plainData: ByteArray): ByteArray {
-        val key = derivedSessionKey ?: throw IllegalStateException("会话密钥未建立")
+        check(isCipherInitialized) { "会话密钥未建立" }
         val iv = createIv(encIv++)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(derivedSessionKey, "AES"), GCMParameterSpec(128, iv))
         return cipher.doFinal(plainData)
     }
 
     public fun decryptPayload(encryptedData: ByteArray): ByteArray {
-        val key = derivedSessionKey ?: throw IllegalStateException("会话密钥未建立")
+        check(isCipherInitialized) { "会话密钥未建立" }
         val iv = createIv(decIv++)
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, iv))
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(derivedSessionKey, "AES"), GCMParameterSpec(128, iv))
         return cipher.doFinal(encryptedData)
     }
 
     private fun createIv(counter: Long): ByteArray {
         val iv = ByteArray(12)
-        // ADB 规定 IV 前 8 字节为 Little-Endian 递增计数器
         ByteBuffer.wrap(iv, 0, 8).order(ByteOrder.LITTLE_ENDIAN).putLong(counter)
         return iv
     }
 
     override fun close() {
-        derivedSessionKey?.let { Arrays.fill(it, 0.toByte()) }
+        Arrays.fill(derivedSessionKey, 0.toByte())
         spake2Context.destroy()
     }
 
     companion object {
-        private val CLIENT_NAME = "adb pair client".toByteArray(Charsets.UTF_8)
-        private val SERVER_NAME = "adb pair server".toByteArray(Charsets.UTF_8)
+        // 关键点 1：带上 \u0000 保证 16 字节 C-Style 字符串格式
+        private val CLIENT_NAME = "adb pair client\u0000".toByteArray(Charsets.UTF_8)
+        private val SERVER_NAME = "adb pair server\u0000".toByteArray(Charsets.UTF_8)
+
+        // 关键点 2：HKDF 衍生密钥所需的 info 标识符
+        private val HKDF_INFO = "adb pairing_auth aes-128-gcm key".toByteArray(Charsets.UTF_8)
     }
 }
