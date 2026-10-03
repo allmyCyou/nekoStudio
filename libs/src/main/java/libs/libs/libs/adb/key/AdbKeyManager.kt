@@ -34,7 +34,7 @@ public class AdbKeyManager(
      * 指定密钥存放目录并自动加载/初始化密钥。
      */
     @Synchronized
-    public fun initFromDirectory(keyDir: File, comment: String = "nekoStudio@adbd"): AdbKeyPair {
+    public fun initFromDirectory(keyDir: File, comment: String): AdbKeyPair {
         keyDir.mkdirs()
         val privFile = File(keyDir, "adbkey")
         val pubFile = File(keyDir, "adbkey.pub")
@@ -58,7 +58,7 @@ public class AdbKeyManager(
                 val privPem = privFile.readText()
                 val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
                 
-                loadKeys(privPem, pubStr)
+                loadKeys(privPem, pubStr, comment)
 
                 // 自动补齐丢失的公钥文件
                 if (!pubFile.exists() || pubFile.length() == 0L) {
@@ -82,7 +82,7 @@ public class AdbKeyManager(
      * 检查并确保密钥加载。如果未加载，优先根据配置的路径加载，无路径或不存在才生成。
      */
     @Synchronized
-    public fun ensureLoaded(comment: String = "nekoStudio@adbd") {
+    public fun ensureLoaded(comment: String) {
         if (isLoaded) return
 
         val privFile = privateKeyFile
@@ -99,7 +99,7 @@ public class AdbKeyManager(
      * 设置文件路径并自动加载；带文件损坏保护机制
      */
     @Synchronized
-    public fun setupFilesAndLoad(privFile: File, pubFile: File) {
+    public fun setupFilesAndLoad(privFile: File, pubFile: File, comment: String) {
         this.privateKeyFile = privFile
         this.publicKeyFile = pubFile
 
@@ -107,15 +107,17 @@ public class AdbKeyManager(
             try {
                 val privPem = privFile.readText()
                 val pubStr = if (pubFile.exists() && pubFile.length() > 0) pubFile.readText() else null
-                loadKeys(privPem, pubStr)
+                loadKeys(privPem, pubStr, comment)
 
                 if (!pubFile.exists() || pubFile.length() == 0L) {
                     pubFile.parentFile?.mkdirs()
                     pubFile.writeText(getAdbPublicKeyString())
                 }
             } catch (_: Exception) {
-                generateKeyPair()
+                generateKeyPair(comment)
             }
+        } else {
+            generateKeyPair(comment)
         }
     }
 
@@ -158,13 +160,13 @@ public class AdbKeyManager(
     }
 
     @Synchronized
-    public fun loadKeys(adbKeyPem: String, adbKeyPub: String? = null) {
+    public fun loadKeys(adbKeyPem: String, adbKeyPub: String? = null, comment: String) {
         val privKey = AdbKeySerializer.privateKeyFromPem(adbKeyPem)
         val pubStr = if (!adbKeyPub.isNullOrBlank()) {
             adbKeyPub.trim()
         } else {
             val pubParams = AdbKeyUtils.extractPublicKeyParameters(privKey)
-            AdbKeyUtils.convertToAdbPublicKeyString(pubParams)
+            AdbKeyUtils.convertToAdbPublicKeyString(pubParams, comment)
         }
         this.privateKey = privKey
         this.publicKeyString = pubStr

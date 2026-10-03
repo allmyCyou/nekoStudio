@@ -173,8 +173,9 @@ class AdbSessionService : Service() {
         updateShortcutIfNeeded()
         startNotificationTicker()
 
+        val defaultComment = "nekoStudio@adbClient"
         val keyManager = AdbKeyManager().apply {
-            initFromDirectory(File(this@AdbSessionService.filesDir, "adb_keys"))
+            initFromDirectory(File(this@AdbSessionService.filesDir, "adb_keys"), comment = defaultComment)
         }
         adbClient = AdbClient(keyManager)
     }
