@@ -31,7 +31,7 @@ public class AdbPairingClient(
         host: String,
         port: Int,
         pairingCode: String,
-        deviceName: String? = null,
+        deviceName: String?,
         listener: AdbPairingListener?
     ): Boolean = withContext(Dispatchers.IO) {
         try {
