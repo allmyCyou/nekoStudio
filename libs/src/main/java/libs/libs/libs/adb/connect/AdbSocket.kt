@@ -88,7 +88,7 @@ public class AdbSocket {
         this@AdbSocket.outputStream = ssl.outputStream
     }
 
-    /**
+        /**
      * 强制返回指定 Alias 的 KeyManager，防止 JSSE 因 Issuer 匹配失败导致 chooseClientAlias 返回 null
      */
     private class ForceAliasKeyManager(
@@ -96,25 +96,25 @@ public class AdbSocket {
         private val alias: String
     ) : X509ExtendedKeyManager() {
 
-        override fun chooseClientAlias(keyType: Array<out String>, issuers: Array<out Principal>?, socket: Socket?): String = alias
+        override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String = alias
 
-        override fun chooseEngineClientAlias(keyType: Array<out String>, issuers: Array<out Principal>?, engine: SSLEngine?): String = alias
+        override fun chooseEngineClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?): String = alias
 
-        override fun getClientAliases(keyType: String, issuers: Array<out Principal>?): Array<String> = arrayOf(alias)
+        override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String> = arrayOf(alias)
 
-        override fun getServerAliases(keyType: String, issuers: Array<out Principal>?): Array<String>? =
+        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
             delegate.getServerAliases(keyType, issuers)
 
-        override fun chooseServerAlias(keyType: String, issuers: Array<out Principal>?, socket: Socket?): String? =
-            delegate.chooseServerAlias(keyType, issuers)
+        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?): String? =
+            delegate.chooseServerAlias(keyType, issuers, socket)
 
-        override fun chooseEngineServerAlias(keyType: String, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
-            delegate.chooseEngineServerAlias(keyType, issuers)
+        override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
+            delegate.chooseEngineServerAlias(keyType, issuers, engine)
 
-        override fun getCertificateChain(alias: String): Array<out X509Certificate>? =
+        override fun getCertificateChain(alias: String?): Array<out X509Certificate>? =
             delegate.getCertificateChain(alias)
 
-        override fun getPrivateKey(alias: String): PrivateKey? =
+        override fun getPrivateKey(alias: String?): PrivateKey? =
             delegate.getPrivateKey(alias)
     }
 
