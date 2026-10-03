@@ -744,13 +744,13 @@ class MainActivity : ComponentActivity() {
 
                 PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
                     val safeContext = context ?: return
-                    val pm = safeContext.getSystemService(Context.LOCATION_SERVICE) as PowerManager
+                    val pm = safeContext.getSystemService(Context.POWER_SERVICE) as PowerManager
                     appendLog("[INFO] 💤 Doze低电耗模式切换: ${pm.isDeviceIdleMode}")
                 }
 
                 PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> {
                     val safeContext = context ?: return
-                    val pm = safeContext.getSystemService(Context.LOCATION_SERVICE) as PowerManager
+                    val pm = safeContext.getSystemService(Context.POWER_SERVICE) as PowerManager
                     appendLog("[INFO] 🔋 省电模式切换: ${pm.isPowerSaveMode}")
                 }
 
