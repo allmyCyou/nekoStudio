@@ -11,24 +11,20 @@ public class AdbStream(
     public val localId: Int,
     public val remoteId: Int
 ) {
+    @Volatile
     private var isClosed = false
     
-    // 用于接收中央分发器派发给当前 Stream 的 Packet 队列
-    internal val incomingChannel = Channel<AdbPacket>(Channel.UNLIMITED)
+    // 设置合理的 Channel 容量背压，避免海量日志场景下的 OOM
+    internal val incomingChannel = Channel<AdbPacket>(64)
     
-    // 用于写数据时的流控 Ack 信号（收到 CMD_OKAY 后解除挂起）
     internal val writeAckChannel = Channel<Unit>(Channel.CONFLATED)
 
-    /**
-     * 读取对端发送的数据块 (CMD_WRTE)
-     */
     public suspend fun read(): ByteArray? = withContext(Dispatchers.IO) {
         if (isClosed) return@withContext null
 
         for (packet in incomingChannel) {
             when (packet.command) {
                 AdbCommand.CMD_WRTE -> {
-                    // 收到 CMD_WRTE 后，必须向对端回复 CMD_OKAY，告知可以继续发送下一块
                     val okayPacket = AdbPacket(
                         command = AdbCommand.CMD_OKAY,
                         arg0 = localId,
@@ -47,9 +43,6 @@ public class AdbStream(
         null
     }
 
-    /**
-     * 向流中写入数据（严格遵循流控：发送 CMD_WRTE ➔ 挂起等待 CMD_OKAY）
-     */
     public suspend fun write(data: ByteArray) = withContext(Dispatchers.IO) {
         if (isClosed) throw IllegalStateException("AdbStream $localId is closed")
 
@@ -60,19 +53,14 @@ public class AdbStream(
             payload = data
         )
         
-        // 1. 发送数据块
         connection.sendPacket(writePacket)
 
-        // 2. 挂起等待对端回复 CMD_OKAY（流控关键）
         val ack = writeAckChannel.receiveCatching()
         if (ack.isFailure || isClosed) {
-            throw IllegalStateException("Stream closed while waiting for write ACK")
+            throw IllegalStateException("Stream $localId closed while waiting for write ACK")
         }
     }
 
-    /**
-     * 关闭流并告知对端
-     */
     public suspend fun close() = withContext(Dispatchers.IO) {
         if (isClosed) return@withContext
         closeInternal()

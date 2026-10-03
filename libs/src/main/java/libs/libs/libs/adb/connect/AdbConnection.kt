@@ -6,6 +6,8 @@ import libs.libs.libs.adb.public.AdbPacket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,7 +18,11 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
-public class AdbConnection(private val keyManager: AdbKeyManager) {
+public class AdbConnection(
+    private val keyManager: AdbKeyManager,
+    // 1. 结合 SupervisorJob，确保作用域在整个 Connection 声明周期内常驻且互不干扰
+    private val connectionScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+) {
 
     private val socket = AdbSocket()
     private val localIdGenerator = AtomicInteger(1)
@@ -32,10 +38,9 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
     public val features: Set<String> get() = _features
 
     private val activeStreams = ConcurrentHashMap<Int, AdbStream>()
-    private val pendingOpenRequests = ConcurrentHashMap<Int, kotlinx.coroutines.channels.Channel<AdbPacket>>()
+    private val pendingOpenRequests = ConcurrentHashMap<Int, Channel<AdbPacket>>()
 
     private var dispatchJob: Job? = null
-    private val connectionScope = CoroutineScope(Dispatchers.IO)
 
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
@@ -81,7 +86,6 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
                     AdbCommand.CMD_STLS -> {
                         _state.value = AdbConnectionState.Authenticating
 
-                        // 1. 向 adbd 回复 CMD_STLS 确认包，通知对端切换至 TLS 模式
                         val stlsResponsePacket = AdbPacket(
                             command = AdbCommand.CMD_STLS,
                             arg0 = response.arg0,
@@ -90,10 +94,7 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
                         )
                         sendPacket(stlsResponsePacket)
 
-                        // 2. 双方同步将 Socket 升级为 TLS 通道
                         socket.startTls(keyManager)
-
-                        // 3. 在 TLS 加密通道建立后，重新发送 CNXN 协商
                         sendPacket(cnxnPacket)
                     }
 
@@ -147,31 +148,53 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
         dispatchJob = connectionScope.launch {
             try {
                 while (socket.isConnected) {
-                    val packet = socket.readPacket()
+                    val packet = try {
+                        socket.readPacket()
+                    } catch (e: Exception) {
+                        // 底层 Socket 被关闭或达到 EOF，退出循环
+                        break
+                    }
+
                     val targetLocalId = packet.arg1
 
+                    // A. 判断是否为 pendingOpenRequests 中的响应
                     val pendingChannel = pendingOpenRequests[targetLocalId]
                     if (pendingChannel != null) {
                         pendingChannel.send(packet)
                         continue
                     }
 
+                    // B. 判断是否为已有 activeStreams 的响应
                     val stream = activeStreams[targetLocalId]
                     if (stream != null) {
                         when (packet.command) {
                             AdbCommand.CMD_OKAY -> {
                                 stream.writeAckChannel.trySend(Unit)
                             }
-                            AdbCommand.CMD_WRTE, AdbCommand.CMD_CLSE -> {
+                            AdbCommand.CMD_WRTE -> {
+                                stream.incomingChannel.send(packet)
+                            }
+                            AdbCommand.CMD_CLSE -> {
+                                stream.closeInternal()
                                 stream.incomingChannel.send(packet)
                             }
                         }
+                    } else {
+                        // C. 收到非法或已流失 Stream 的数据包，回回复 CMD_CLSE 释放设备端资源
+                        if (packet.command == AdbCommand.CMD_WRTE) {
+                            val closePacket = AdbPacket(
+                                command = AdbCommand.CMD_CLSE,
+                                arg0 = packet.arg1,
+                                arg1 = packet.arg0,
+                                payload = ByteArray(0)
+                            )
+                            runCatching { sendPacket(closePacket) }
+                        }
                     }
                 }
-            } catch (e: Exception) {
-                activeStreams.values.forEach { it.closeInternal() }
-                activeStreams.clear()
-                _state.value = AdbConnectionState.Disconnected
+            } finally {
+                // 只有完全退出循环（底层连接断开）时才执行彻底清理
+                cleanupOnDisconnected()
             }
         }
     }
@@ -187,6 +210,8 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
     }
 
     public suspend fun openStream(destination: String): AdbStream? = withContext(Dispatchers.IO) {
+        check(state.value is AdbConnectionState.Connected) { "ADB Connection is not active" }
+
         val localId = localIdGenerator.getAndIncrement()
 
         val destBytes = if (destination.endsWith("\u0000")) {
@@ -202,13 +227,13 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
             payload = destBytes
         )
 
-        val openChannel = kotlinx.coroutines.channels.Channel<AdbPacket>(1)
+        val openChannel = Channel<AdbPacket>(1)
         pendingOpenRequests[localId] = openChannel
 
         try {
             sendPacket(openPacket)
 
-            val response = openChannel.receive()
+            val response = openChannel.receiveCatching().getOrNull() ?: return@withContext null
 
             if (response.command == AdbCommand.CMD_OKAY) {
                 val remoteId = response.arg0
@@ -220,6 +245,7 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
             }
         } finally {
             pendingOpenRequests.remove(localId)
+            openChannel.close()
         }
     }
 
@@ -233,13 +259,23 @@ public class AdbConnection(private val keyManager: AdbKeyManager) {
         }
     }
 
+    private fun cleanupOnDisconnected() {
+        pendingOpenRequests.forEach { (_, channel) -> channel.close() }
+        pendingOpenRequests.clear()
+
+        activeStreams.values.forEach { it.closeInternal() }
+        activeStreams.clear()
+
+        socket.close()
+
+        if (_state.value !is AdbConnectionState.Disconnected) {
+            _state.value = AdbConnectionState.Disconnected
+        }
+    }
+
     public fun disconnect() {
         dispatchJob?.cancel()
         dispatchJob = null
-        activeStreams.values.forEach { it.closeInternal() }
-        activeStreams.clear()
-        pendingOpenRequests.clear()
-        socket.close()
-        _state.value = AdbConnectionState.Disconnected
+        cleanupOnDisconnected()
     }
 }

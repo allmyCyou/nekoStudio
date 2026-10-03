@@ -28,23 +28,21 @@ public class AdbSocket {
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
 
-    /**
-     * 建立底层 TCP Socket 连接
-     */
     public suspend fun connect(host: String, port: Int, timeoutMs: Int = 10000) = withContext(Dispatchers.IO) {
         close()
         val s = Socket()
         s.connect(InetSocketAddress(host, port), timeoutMs)
-        s.tcpNoDelay = true // 禁用 Nagle 算法，减少短包交互延迟
+        
+        // --- 保持长连接的关键配置 ---
+        s.tcpNoDelay = true
+        s.keepAlive = true // 开启 TCP 保活探针
+        s.soTimeout = 0    // 无限超时，阻塞式 read 由协程的取消或 Socket 关闭来中断
         
         this@AdbSocket.socket = s
         this@AdbSocket.inputStream = s.getInputStream()
         this@AdbSocket.outputStream = s.getOutputStream()
     }
 
-    /**
-     * 将当前已连接的明文 Socket 原地升级为 TLS Socket
-     */
     public suspend fun startTls(keyManager: AdbKeyManager) = withContext(Dispatchers.IO) {
         val rawSocket = socket ?: throw IllegalStateException("Socket is not connected")
         val host = rawSocket.inetAddress?.hostAddress ?: "localhost"
@@ -62,7 +60,6 @@ public class AdbSocket {
             init(keyStore, KEY_PASSWORD.toCharArray())
         }
 
-        // 获取原生的 KeyManager 并用强制选择 Alias 的包装类进行封装
         val origKm = kmf.keyManagers.first { it is X509ExtendedKeyManager } as X509ExtendedKeyManager
         val forceKm = ForceAliasKeyManager(origKm, CLIENT_ALIAS)
 
@@ -88,9 +85,6 @@ public class AdbSocket {
         this@AdbSocket.outputStream = ssl.outputStream
     }
 
-        /**
-     * 强制返回指定 Alias 的 KeyManager，防止 JSSE 因 Issuer 匹配失败导致 chooseClientAlias 返回 null
-     */
     private class ForceAliasKeyManager(
         private val delegate: X509ExtendedKeyManager,
         private val alias: String
@@ -118,9 +112,6 @@ public class AdbSocket {
             delegate.getPrivateKey(alias)
     }
 
-    /**
-     * 从 Socket 准确读取指定长度的 ByteArray
-     */
     private fun readExactly(buffer: ByteArray, length: Int) {
         val stream = inputStream ?: throw IllegalStateException("Socket is not connected")
         var bytesRead = 0
@@ -133,9 +124,6 @@ public class AdbSocket {
         }
     }
 
-    /**
-     * 读取一个完整的 AdbPacket (24 字节 Header + Payload)
-     */
     public suspend fun readPacket(): AdbPacket = withContext(Dispatchers.IO) {
         val headerBytes = ByteArray(AdbPacket.HEADER_SIZE)
         readExactly(headerBytes, AdbPacket.HEADER_SIZE)
@@ -157,9 +145,6 @@ public class AdbSocket {
         )
     }
 
-    /**
-     * 写入一个 AdbPacket 到 Socket
-     */
     public suspend fun writePacket(packet: AdbPacket, skipChecksum: Boolean = false) = withContext(Dispatchers.IO) {
         val stream = outputStream ?: throw IllegalStateException("Socket is not connected")
         val bytes = packet.toByteArray(skipChecksum = skipChecksum)
@@ -167,9 +152,6 @@ public class AdbSocket {
         stream.flush()
     }
 
-    /**
-     * 安全关闭底层连接
-     */
     public fun close() {
         try {
             inputStream?.close()

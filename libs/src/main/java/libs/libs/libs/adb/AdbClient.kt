@@ -20,10 +20,13 @@ import libs.libs.libs.adb.sync.FileStatV2
 import libs.libs.libs.adb.sync.SyncFlags
 import libs.libs.libs.adb.usb.accessory.AdbUsbAccessoryManager
 import libs.libs.libs.adb.usb.host.AdbUsbHostConnection
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
-import kotlin.OptIn
 import java.io.File
 import java.io.InputStream
 
@@ -36,24 +39,26 @@ public class AdbClient(
     public val keyManager: AdbKeyManager,
     public val connection: AdbConnection = AdbConnection(keyManager)
 ) {
-    // 1. 核心交互子模块 (持有当前 connection)
-    public val shell: AdbShellClient by lazy { AdbShellClient(connection) }
-    public val abb: AdbAbbClient by lazy { AdbAbbClient(connection) }
-    public val sync: AdbSyncClientV2 by lazy { AdbSyncClientV2(connection) }
-    public val rootClient: AdbRootClient by lazy { AdbRootClient(connection) }
+    // 1. 核心交互子模块 (确保密钥初始化并在 Connection 状态更新时正常运行)
+    public val shell: AdbShellClient = AdbShellClient(connection)
+    public val abb: AdbAbbClient = AdbAbbClient(connection)
+    public val sync: AdbSyncClientV2 = AdbSyncClientV2(connection)
+    public val rootClient: AdbRootClient = AdbRootClient(connection)
 
     // 2. 配对与 mDNS 搜索子模块
     public val pairingManager: AdbPairingManager by lazy { AdbPairingManager(keyManager) }
 
     public fun createMdnsManager(context: Context): AdbMdnsManager = AdbMdnsManager(context)
 
-    // 3. USB 扩展模块（按需动态构建）
+    // 3. USB 扩展模块
     public fun createUsbHostConnection(context: Context, device: UsbDevice): AdbUsbHostConnection {
+        ensureKeyLoaded()
         val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
         return AdbUsbHostConnection(usbManager, device)
     }
 
     public fun createUsbHostConnection(usbManager: UsbManager, device: UsbDevice): AdbUsbHostConnection {
+        ensureKeyLoaded()
         return AdbUsbHostConnection(usbManager, device)
     }
 
@@ -71,7 +76,7 @@ public class AdbClient(
     public val features: Set<String> get() = connection.features
     public fun hasFeature(feature: String): Boolean = connection.hasFeature(feature)
 
-    // 连接与配对 API (对接 mdns & pair SPAKE2 模块)
+    // 连接与配对 API
 
     /**
      * 无线配对 (基于 Android 11+ SPAKE2 / SPAKE2+ 握手协议)
@@ -119,12 +124,12 @@ public class AdbClient(
     /**
      * 检查并确保 RSA 密钥已被正确加载或初始化（优先从磁盘读取，文件不存在时才自动生成）
      */
-    private fun ensureKeyLoaded() {
+    public fun ensureKeyLoaded() {
         val defaultComment = "nekoStudio@adbClient"
         keyManager.ensureLoaded(comment = defaultComment)
     }
 
-    // 提权与重启 API (直接对接 root 模块)
+    // 提权与重启 API
 
     public suspend fun getProp(property: String): String {
         return shell.execV2("getprop $property").stdout.trim()
@@ -154,28 +159,27 @@ public class AdbClient(
         )
     }
 
-    public suspend fun reboot(target: String = ""): Boolean {
+    /**
+     * 重启设备，处理设备断开时的 Socket 异常
+     */
+    public suspend fun reboot(target: String = ""): Boolean = withContext(Dispatchers.IO) {
         val dest = if (target.isBlank()) "reboot:" else "reboot:$target"
-        val stream = connection.openStream(dest)
-        val success = stream != null
-        stream?.close()
-        return success
+        runCatching {
+            val stream = connection.openStream(dest)
+            val success = stream != null
+            stream?.close()
+            success
+        }.getOrDefault(true) // 设备执行 reboot 后网络会立即切断，抛出异常通常代表命令已成功投递
     }
 
-    // 应用安装与传输 API (全面由 AdbAbbClient 模块托管)
+    // 应用安装与传输 API
 
-    /**
-     * 安装单体 APK 文件 (底层由 AdbAbbClient 自动选择 ABB 极速流或 pm install 兼容模式)
-     */
     public suspend fun installApk(
         apkFile: File,
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = abb.installApk(apkFile, options, onProgress)
 
-    /**
-     * 流式安装单体 APK Stream
-     */
     public suspend fun installApk(
         apkStream: InputStream,
         apkSize: Long,
@@ -183,78 +187,68 @@ public class AdbClient(
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = abb.installApk(apkStream, apkSize, options, onProgress)
 
-    /**
-     * 安装 APKS 应用套件 (底层由 AdbAbbClient 自动选择 ABB 零磁盘解压流或 pm install 兼容模式)
-     */
     public suspend fun installApks(
         apksFile: File,
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = abb.installApks(apksFile, options, onProgress)
 
-    /**
-     * 流式安装 Split APKs 套件
-     */
     public suspend fun installSplitApks(
         apks: Map<String, Pair<InputStream, Long>>,
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = abb.installSplitApks(apks, options, onProgress)
 
-    // 文件传输 API (对接 sync 模块)
+    // 文件传输 API
 
-    /**
-     * 推送文件到远程设备 (优先使用 Sync V2 SND2，不支持时自动退回 Sync V1 SEND)
-     */
     public suspend fun pushFile(
         localFile: File,
         remotePath: String,
         flags: Int = SyncFlags.FLAG_NONE,
         onProgress: ((written: Long, total: Long) -> Unit)? = null
-    ): Result<Unit> = runCatching {
-        localFile.inputStream().use { inputStream ->
-            sync.pushV2(
-                inputStream = inputStream,
-                remotePath = remotePath,
-                totalSize = localFile.length(),
-                flags = flags,
-                onProgress = onProgress
-            )
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            localFile.inputStream().use { inputStream ->
+                sync.pushV2(
+                    inputStream = inputStream,
+                    remotePath = remotePath,
+                    totalSize = localFile.length(),
+                    flags = flags,
+                    onProgress = onProgress
+                )
+            }
         }
     }
 
-    /**
-     * 从远程设备拉取文件 (优先使用 Sync V2 RCV2，不支持时自动退回 Sync V1 RECV)
-     */
     public suspend fun pullFile(
         remotePath: String,
         localFile: File,
         flags: Int = SyncFlags.FLAG_NONE,
         onProgress: ((read: Long, total: Long) -> Unit)? = null
-    ): Result<Unit> = runCatching {
-        localFile.outputStream().use { outputStream ->
-            sync.pullV2(
-                remotePath = remotePath,
-                outputStream = outputStream,
-                flags = flags,
-                onProgress = onProgress
-            )
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            localFile.outputStream().use { outputStream ->
+                sync.pullV2(
+                    remotePath = remotePath,
+                    outputStream = outputStream,
+                    flags = flags,
+                    onProgress = onProgress
+                )
+            }
         }
     }
 
-    /**
-     * 获取文件完整属性 (优先使用 Sync V2 STA2，不支持时自动由 V1 STAT 转换补全)
-     */
     public suspend fun stat(remotePath: String): FileStatV2 = sync.statV2(remotePath)
 
-    /**
-     * 列出目录文件列表 (优先使用 Sync V2 LST2，不支持时自动由 V1 LIST 转换补全)
-     */
     public suspend fun listFiles(remotePath: String): List<FileStatV2> = sync.listV2(remotePath)
 
-    // Shell 与日志流 API (对接 shell 模块)
+    // Shell 与日志流 API
 
+    /**
+     * 实时获取 logcat 日志流，自动调度到 IO 线程，并确保上层流取消时正确清理流资源
+     */
     public fun streamLogcat(args: String = "-v time"): Flow<ShellStreamChunk> {
         return shell.execV2Stream("logcat $args")
+            .flowOn(Dispatchers.IO)
     }
 }
