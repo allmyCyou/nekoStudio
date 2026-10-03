@@ -120,7 +120,8 @@ public class AdbClient(
      * 检查并确保 RSA 密钥已被正确加载或初始化（优先从磁盘读取，文件不存在时才自动生成）
      */
     private fun ensureKeyLoaded() {
-        keyManager.ensureLoaded()
+        val defaultComment = "nekoStudio@adbClient"
+        keyManager.ensureLoaded(comment = defaultComment)
     }
 
     // 提权与重启 API (直接对接 root 模块)
