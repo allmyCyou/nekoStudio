@@ -72,7 +72,7 @@ public data class AdbPacket(
         // --- 常用建包便捷工厂方法 ---
 
         public fun createCnxn(
-            version: Int = AdbCommand.A_VERSION_SKIP_CHECKSUM,
+            version: Int = AdbCommand.A_VERSION,
             maxPayload: Int = AdbCommand.MAX_PAYLOAD,
             systemIdentity: String = "host::\u0000"
         ): AdbPacket = AdbPacket(

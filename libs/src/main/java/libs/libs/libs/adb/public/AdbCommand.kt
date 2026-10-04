@@ -17,7 +17,7 @@ public object AdbCommand {
 
     // ADB 协议版本号
     public const val A_VERSION: Int = 0x01000000 // 基础协议版本 1.0
-    public const val A_VERSION_SKIP_CHECKSUM: Int = 0x01000001 // TLS / 跳过 CRC32 校验版本
+    public const val A_VERSION_SKIP_CHECKSUM: Int = 0x01000001 // USB 物理连接专用 / 跳过 CRC32 校验版本
 
     // 最大 Payload 限制
     public const val MAX_PAYLOAD: Int = 1024 * 1024 // 现代 ADB 默认为 1MB
