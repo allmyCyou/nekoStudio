@@ -21,6 +21,7 @@ public object AdbCommand {
 
     // 最大 Payload 限制
     public const val MAX_PAYLOAD: Int = 1024 * 1024 // 现代 ADB 默认为 1MB
+    public const val CONNECT_MAXDATA: Int = 256 * 1024 // CNXN 初始握手阶段的默认 Payload 上限 (256KB)
 
     /**
      * 将 4 字节字符串解包为小端序 Int (工具辅助函数)
