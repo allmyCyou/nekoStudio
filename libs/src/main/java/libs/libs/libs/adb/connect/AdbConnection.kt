@@ -7,15 +7,18 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 public class AdbConnection(
@@ -24,6 +27,7 @@ public class AdbConnection(
 ) {
     private val socket = AdbSocket()
     private val localIdGenerator = AtomicInteger(1)
+    private val writeMutex = Mutex()
 
     private val _state = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected)
     public val state: StateFlow<AdbConnectionState> = _state.asStateFlow()
@@ -39,7 +43,7 @@ public class AdbConnection(
     private val pendingOpenRequests = ConcurrentHashMap<Int, Channel<AdbPacket>>()
 
     private var dispatchJob: Job? = null
-    private val isCleanedUp = AtomicBoolean(false)
+    private val isCleanedUp = java.util.concurrent.atomic.AtomicBoolean(false)
 
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
@@ -80,7 +84,7 @@ public class AdbConnection(
                             negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
                             val peerMaxData = response.arg1
                             if (peerMaxData > 0) {
-                                negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.CONNECT_MAXDATA)
+                                negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.MAX_PAYLOAD)
                             }
 
                             val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
@@ -204,9 +208,9 @@ public class AdbConnection(
 
     private fun parseFeatures(banner: String): Set<String> {
         val featuresSegment = banner.split(';')
-            .firstOrNull { it.startsWith("features=") } ?: return emptySet()
+            .firstOrNull { it.contains("features=") } ?: return emptySet()
 
-        return featuresSegment.removePrefix("features=")
+        return featuresSegment.substringAfter("features=")
             .split(',')
             .filter { it.isNotBlank() }
             .toSet()
@@ -216,7 +220,6 @@ public class AdbConnection(
         check(state.value is AdbConnectionState.Connected) { "ADB Connection is not active" }
 
         val localId = localIdGenerator.getAndIncrement()
-
         val destBytes = if (destination.endsWith("\u0000")) {
             destination.toByteArray(Charsets.UTF_8)
         } else {
@@ -224,44 +227,45 @@ public class AdbConnection(
         }
 
         val isDelayedAck = hasFeature("delayed_ack")
-        val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
+        val openChannel = Channel<AdbPacket>(1)
+
+        // 提前构建 Stream 并直接放入 activeStreams，防止 CMD_WRTE 在 CMD_OKAY 之后瞬间到达触发误杀
+        val stream = AdbStream(
+            connection = this@AdbConnection,
+            localId = localId,
+            remoteId = 0, // 收到 CMD_OKAY 后更新
+            maxPayloadSize = negotiatedMaxPayloadSize,
+            initialAvailableSendBytes = negotiatedMaxPayloadSize.toLong()
+        )
+
+        activeStreams[localId] = stream
+        pendingOpenRequests[localId] = openChannel
 
         val openPacket = AdbPacket(
             command = AdbCommand.CMD_OPEN,
             arg0 = localId,
-            arg1 = initialRxWindow,
+            arg1 = if (isDelayedAck) negotiatedMaxPayloadSize else 0,
             payload = destBytes
         )
 
-        val openChannel = Channel<AdbPacket>(1)
-        pendingOpenRequests[localId] = openChannel
-
         try {
             sendPacket(openPacket)
-
-            val response = openChannel.receiveCatching().getOrNull() ?: return@withContext null
+            val response = openChannel.receiveCatching().getOrNull() ?: run {
+                activeStreams.remove(localId)
+                return@withContext null
+            }
 
             if (response.command == AdbCommand.CMD_OKAY) {
                 val remoteId = response.arg0
-
-                val initialTxCredit = if (isDelayedAck && response.payload.size == 4) {
-                    response.payload.readIntLe().toLong()
-                } else {
-                    negotiatedMaxPayloadSize.toLong()
-                }
-
-                val stream = AdbStream(
-                    connection = this@AdbConnection,
-                    localId = localId,
-                    remoteId = remoteId,
-                    maxPayloadSize = negotiatedMaxPayloadSize,
-                    initialAvailableSendBytes = initialTxCredit
-                )
-                activeStreams[localId] = stream
+                stream.updateRemoteId(remoteId)
                 return@withContext stream
             } else {
+                activeStreams.remove(localId)
                 return@withContext null
             }
+        } catch (e: Exception) {
+            activeStreams.remove(localId)
+            throw e
         } finally {
             pendingOpenRequests.remove(localId)
             openChannel.close()
@@ -272,8 +276,10 @@ public class AdbConnection(
         activeStreams.remove(localId)
     }
 
-    public suspend fun sendPacket(packet: AdbPacket) {
-        socket.writePacket(packet, skipChecksum = isSkipChecksum)
+    public suspend fun sendPacket(packet: AdbPacket) = withContext(Dispatchers.IO) {
+        writeMutex.withLock {
+            socket.writePacket(packet, skipChecksum = isSkipChecksum)
+        }
     }
 
     private fun cleanupOnDisconnected() {
