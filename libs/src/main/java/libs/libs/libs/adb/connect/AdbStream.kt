@@ -48,7 +48,12 @@ public class AdbStream(
     }
 
     /**
-     * 读取单个完整包的 Payload（兼容单次交互场景，如 getprop/shell 命令）
+     * 无参读取方法（兼容历史调用如 AdbAbbClient / AdbShellClient）
+     */
+    public suspend fun read(): ByteArray? = readNextChunk()
+
+    /**
+     * 读取单个完整包的 Payload（针对单次交互场景，如 getprop/shell 命令）
      */
     public suspend fun readNextChunk(): ByteArray? = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext null
