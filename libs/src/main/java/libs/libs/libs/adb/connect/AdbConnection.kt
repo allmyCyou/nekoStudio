@@ -21,7 +21,6 @@ import java.util.concurrent.atomic.AtomicInteger
 
 public class AdbConnection(
     private val keyManager: AdbKeyManager,
-    // 1. 结合 SupervisorJob，确保作用域在整个 Connection 声明周期内常驻且互不干扰
     private val connectionScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) {
 
@@ -57,11 +56,9 @@ public class AdbConnection(
         try {
             _state.value = AdbConnectionState.Connecting
 
-            // 将“建立 Socket + CNXN/AUTH 握手”全过程限制在超时时间内
             withTimeout(timeoutMs) {
                 socket.connect(host, port, timeoutMs.toInt())
 
-                // 1. 发送 CNXN 握手 (TCP 网络连接使用 0x01000000)
                 val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
                 val cnxnPacket = AdbPacket(
                     command = AdbCommand.CMD_CNXN,
@@ -71,7 +68,6 @@ public class AdbConnection(
                 )
                 sendPacket(cnxnPacket)
 
-                // 2. 握手 & 鉴权阶段
                 var isHandshakeDone = false
                 var sentSignature = false
 
@@ -115,7 +111,6 @@ public class AdbConnection(
                                     sendPacket(authSignaturePacket)
                                     sentSignature = true
                                 } else {
-                                    // 触发手机端“允许 USB 调试吗”弹窗
                                     val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
                                     val authPubKeyPacket = AdbPacket(
                                         command = AdbCommand.CMD_AUTH,
@@ -137,10 +132,7 @@ public class AdbConnection(
                 }
             }
 
-            // 3. 握手成功，启动后台 Loop 接收解复用数据
             startDispatchLoop()
-
-            // 4. 显式返回 Connected 状态
             _state.value as AdbConnectionState.Connected
 
         } catch (e: Exception) {
@@ -159,7 +151,6 @@ public class AdbConnection(
                     val packet = try {
                         socket.readPacket()
                     } catch (e: Exception) {
-                        // 底层 Socket 被关闭或达到 EOF，退出循环
                         break
                     }
 
@@ -177,7 +168,8 @@ public class AdbConnection(
                     if (stream != null) {
                         when (packet.command) {
                             AdbCommand.CMD_OKAY -> {
-                                stream.writeAckChannel.trySend(Unit)
+                                // 修正：将 OKAY 包完整透传给 Stream，以便解析 delayed_ack 4 字节配额
+                                stream.onOkayReceived(packet)
                             }
                             AdbCommand.CMD_WRTE -> {
                                 stream.incomingChannel.send(packet)
@@ -188,7 +180,7 @@ public class AdbConnection(
                             }
                         }
                     } else {
-                        // C. 收到非法或已流失 Stream 的数据包，回回复 CMD_CLSE 释放设备端资源
+                        // C. 收到非法或已注销 Stream 的 WRTE 数据包，回复 CMD_CLSE 释放设备端资源
                         if (packet.command == AdbCommand.CMD_WRTE) {
                             val closePacket = AdbPacket(
                                 command = AdbCommand.CMD_CLSE,
@@ -201,7 +193,6 @@ public class AdbConnection(
                     }
                 }
             } finally {
-                // 只有完全退出循环（底层连接断开）时才执行彻底清理
                 cleanupOnDisconnected()
             }
         }
