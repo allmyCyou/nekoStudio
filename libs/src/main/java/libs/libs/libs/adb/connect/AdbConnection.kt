@@ -25,10 +25,8 @@ public class AdbConnection(
     private val keyManager: AdbKeyManager,
     private val connectionScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) {
-
     private val socket = AdbSocket()
     private val localIdGenerator = AtomicInteger(1)
-    
     private val writeMutex = Mutex()
 
     private val _state = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected)
@@ -45,6 +43,7 @@ public class AdbConnection(
     private val pendingOpenRequests = ConcurrentHashMap<Int, Channel<AdbPacket>>()
 
     private var dispatchJob: Job? = null
+    private val isCleanedUp = java.util.concurrent.atomic.AtomicBoolean(false)
 
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
@@ -58,9 +57,10 @@ public class AdbConnection(
         timeoutMs: Long = 10000L
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
         try {
+            isCleanedUp.set(false)
             _state.value = AdbConnectionState.Connecting
 
-            withTimeout(timeoutMs) {
+            val connectedState: AdbConnectionState.Connected = withTimeout(timeoutMs) {
                 socket.connect(host, port, timeoutMs.toInt())
 
                 val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
@@ -74,6 +74,7 @@ public class AdbConnection(
 
                 var isHandshakeDone = false
                 var sentSignature = false
+                var finalConnectedState: AdbConnectionState.Connected? = null
 
                 while (!isHandshakeDone) {
                     val response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
@@ -88,8 +89,9 @@ public class AdbConnection(
 
                             val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
                             _features = parseFeatures(banner)
-                            val connectedState = AdbConnectionState.Connected(banner)
-                            _state.value = connectedState
+                            val state = AdbConnectionState.Connected(banner)
+                            _state.value = state
+                            finalConnectedState = state
                             isHandshakeDone = true
                         }
 
@@ -139,10 +141,11 @@ public class AdbConnection(
                         }
                     }
                 }
+                finalConnectedState ?: throw IllegalStateException("Handshake finished without Connected state")
             }
 
             startDispatchLoop()
-            _state.value as AdbConnectionState.Connected
+            connectedState
 
         } catch (e: Exception) {
             disconnect()
@@ -165,40 +168,36 @@ public class AdbConnection(
 
                     val targetLocalId = packet.arg1
 
-                    // A. Response to pending open request
-                    val pendingChannel = pendingOpenRequests[targetLocalId]
-                    if (pendingChannel != null) {
-                        pendingChannel.send(packet)
-                        continue
-                    }
-
-                    // B. Response to active stream
+                    // 1. 优先路由给已激活的 Stream
                     val stream = activeStreams[targetLocalId]
                     if (stream != null) {
                         when (packet.command) {
-                            AdbCommand.CMD_OKAY -> {
-                                stream.onOkayReceived(packet)
-                            }
-                            AdbCommand.CMD_WRTE -> {
-                                stream.incomingChannel.send(packet)
-                            }
+                            AdbCommand.CMD_OKAY -> stream.onOkayReceived(packet)
+                            AdbCommand.CMD_WRTE -> stream.incomingChannel.send(packet)
                             AdbCommand.CMD_CLSE -> {
-                                // Fix: Deliver CMD_CLSE packet before calling closeInternal()
                                 runCatching { stream.incomingChannel.send(packet) }
                                 stream.closeInternal()
                             }
                         }
-                    } else {
-                        // C. Unregistered stream response cleanup
-                        if (packet.command == AdbCommand.CMD_WRTE) {
-                            val closePacket = AdbPacket(
-                                command = AdbCommand.CMD_CLSE,
-                                arg0 = packet.arg1,
-                                arg1 = packet.arg0,
-                                payload = ByteArray(0)
-                            )
-                            runCatching { sendPacket(closePacket) }
-                        }
+                        continue
+                    }
+
+                    // 2. 路由给正在等待 OPEN 响应的 Request (非阻塞 trySend 避免死锁)
+                    val pendingChannel = pendingOpenRequests[targetLocalId]
+                    if (pendingChannel != null) {
+                        pendingChannel.trySend(packet)
+                        continue
+                    }
+
+                    // 3. 未注册 Stream 的离群响应清理
+                    if (packet.command == AdbCommand.CMD_WRTE) {
+                        val closePacket = AdbPacket(
+                            command = AdbCommand.CMD_CLSE,
+                            arg0 = packet.arg1,
+                            arg1 = packet.arg0,
+                            payload = ByteArray(0)
+                        )
+                        runCatching { sendPacket(closePacket) }
                     }
                 }
             } finally {
@@ -284,6 +283,8 @@ public class AdbConnection(
     }
 
     private fun cleanupOnDisconnected() {
+        if (!isCleanedUp.compareAndSet(false, true)) return
+
         pendingOpenRequests.forEach { (_, channel) -> channel.close() }
         pendingOpenRequests.clear()
 

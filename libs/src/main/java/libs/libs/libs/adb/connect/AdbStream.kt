@@ -19,16 +19,13 @@ public class AdbStream(
     initialAvailableSendBytes: Long = maxPayloadSize.toLong()
 ) {
     private val isClosed = AtomicBoolean(false)
-
     private val delayedAckEnabled: Boolean = connection.hasFeature("delayed_ack")
 
     private val availableSendBytes = AtomicLong(
         if (delayedAckEnabled) initialAvailableSendBytes else 0L
     )
 
-    // Fix: UNLIMITED capacity avoids suspending central dispatch loop
     internal val incomingChannel = Channel<AdbPacket>(Channel.UNLIMITED)
-
     internal val ackQuotaChannel = Channel<Int>(Channel.UNLIMITED)
 
     private var currentWritePacket: AdbPacket? = null
@@ -85,9 +82,7 @@ public class AdbStream(
             packetReadOffset = 0
         }
 
-        // Fix: Always ACK only the exact bytes read to avoid sliding window inflation
         sendAckForBytes(bytesToRead)
-
         return@withContext bytesToRead
     }
 
@@ -111,8 +106,6 @@ public class AdbStream(
         var currentOffset = offset
 
         while (remaining > 0) {
-            val chunkSize = minOf(remaining, maxPayloadSize)
-
             if (delayedAckEnabled) {
                 while (availableSendBytes.get() <= 0) {
                     val grantedCredit = ackQuotaChannel.receiveCatching().getOrNull()
@@ -120,6 +113,10 @@ public class AdbStream(
                     availableSendBytes.addAndGet(grantedCredit.toLong())
                 }
             }
+
+            // Fix: 严格根据对端剩余额度计算 chunkSize，防止溢出对端接收窗口
+            val currentWindow = if (delayedAckEnabled) availableSendBytes.get().toInt() else maxPayloadSize
+            val chunkSize = minOf(remaining, maxPayloadSize, currentWindow.coerceAtLeast(1))
 
             val payload = if (offset == 0 && length == data.size && chunkSize == data.size) {
                 data
@@ -160,7 +157,6 @@ public class AdbStream(
         }
     }
 
-    // Fix: Extracted common cleanup function
     private fun performCleanup() {
         incomingChannel.close()
         ackQuotaChannel.close()
