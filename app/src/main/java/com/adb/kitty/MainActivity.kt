@@ -951,9 +951,16 @@ class MainActivity : ComponentActivity() {
                             port = tokens.getOrNull(2)?.toIntOrNull() ?: 5555
                         }
 
-                        appendLog("[info] 正在连接 $host:$port ...")
-                        client.connect(host, port)
-                        appendLog("[success] 连接成功")
+                        appendLog("[info] 正在连接 $host:$port")
+ 
+                        // 捕获 connect 返回的 Result，进行成功/失败的分支处理
+                        val result = client.connect(host, port)
+
+                        result.onSuccess { connected ->
+                            appendLog("[success] 连接成功 (${connected.banner})")
+                        }.onFailure { error ->
+                            appendLog("[error] 连接失败: ${error.message ?: "未知错误"}")
+                        }
                     }
 
                     "pair" -> {

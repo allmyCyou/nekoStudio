@@ -24,7 +24,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
 import java.io.File
@@ -106,13 +105,14 @@ public class AdbClient(
 
     /**
      * 连接 TCP 无线/网络设备
+     * 明确返回连接结果 Result<AdbConnectionState.Connected>，方便上层业务判断连接是否成功
      */
     public suspend fun connect(
         host: String,
         port: Int = 5555,
         systemIdentity: String = "host::host_model=NekoStudio;mobile_model=Android;",
-        timeoutMs: Int = 10000
-    ) {
+        timeoutMs: Long = 10000L
+    ): Result<AdbConnectionState.Connected> = runCatching {
         ensureKeyLoaded()
         connection.connect(host, port, systemIdentity, timeoutMs)
     }

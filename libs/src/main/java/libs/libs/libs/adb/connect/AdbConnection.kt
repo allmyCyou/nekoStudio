@@ -51,98 +51,101 @@ public class AdbConnection(
         host: String,
         port: Int = 5555,
         systemIdentity: String = "host::host_model=NekoStudio;mobile_model=Android;",
-        timeoutMs: Int = 10000
-    ) = withContext(Dispatchers.IO) {
+        timeoutMs: Long = 10000L
+    ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
         try {
             _state.value = AdbConnectionState.Connecting
-            socket.connect(host, port, timeoutMs)
 
-            // 1. 发送 CNXN 握手
-            val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
-            val cnxnPacket = AdbPacket(
-                command = AdbCommand.CMD_CNXN,
-                arg0 = AdbCommand.A_VERSION,
-                arg1 = AdbCommand.MAX_PAYLOAD,
-                payload = systemBanner
-            )
-            sendPacket(cnxnPacket)
+            // 将“建立 Socket + CNXN/AUTH 握手”全过程限制在超时时间内
+            withTimeout(timeoutMs) {
+                socket.connect(host, port, timeoutMs.toInt())
 
-            // 2. 握手 & RSA 鉴权 / TLS 协商阶段
-            var isHandshakeDone = false
-            var sentSignature = false // 标记是否已尝试发送过签名
+                // 1. 发送 CNXN 握手 (TCP 网络连接使用 0x01000000)
+                val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
+                val cnxnPacket = AdbPacket(
+                    command = AdbCommand.CMD_CNXN,
+                    arg0 = AdbCommand.A_VERSION,
+                    arg1 = AdbCommand.MAX_PAYLOAD,
+                    payload = systemBanner
+                )
+                sendPacket(cnxnPacket)
 
-            while (!isHandshakeDone) {
-                val response = socket.readPacket()
+                // 2. 握手 & 鉴权阶段
+                var isHandshakeDone = false
+                var sentSignature = false
 
-                when (response.command) {
-                    AdbCommand.CMD_CNXN -> {
-                        negotiatedVersion = response.arg0
-                        val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
-                        _features = parseFeatures(banner)
-                        _state.value = AdbConnectionState.Connected(banner)
-                        isHandshakeDone = true
-                    }
+                while (!isHandshakeDone) {
+                    val response = socket.readPacket()
 
-                    AdbCommand.CMD_STLS -> {
-                        _state.value = AdbConnectionState.Authenticating
-
-                        val stlsResponsePacket = AdbPacket(
-                            command = AdbCommand.CMD_STLS,
-                            arg0 = response.arg0,
-                            arg1 = 0,
-                            payload = ByteArray(0)
-                        )
-                        sendPacket(stlsResponsePacket)
-
-                        socket.startTls(keyManager)
-                        sendPacket(cnxnPacket)
-                    }
-
-                    AdbCommand.CMD_AUTH -> {
-                        _state.value = AdbConnectionState.Authenticating
-
-                        // 服务端发送 CMD_AUTH 时，arg0 恒为 AUTH_TOKEN (1)
-                        if (response.arg0 == AdbCommand.AUTH_TOKEN) {
-                            if (!sentSignature) {
-                                // 第 1 次收到 Token：使用私钥签名并尝试认证
-                                val signature = keyManager.signToken(response.payload)
-                                val authSignaturePacket = AdbPacket(
-                                    command = AdbCommand.CMD_AUTH,
-                                    arg0 = AdbCommand.AUTH_SIGNATURE,
-                                    arg1 = 0,
-                                    payload = signature
-                                )
-                                sendPacket(authSignaturePacket)
-                                sentSignature = true
-                            } else {
-                                // 第 2 次收到 Token：说明签名验证未通过（设备未信任此公钥）
-                                // 必须发送 RSA 公钥，以触发生命周期中的手机屏幕“允许调试”弹窗
-                                val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
-                                val authPubKeyPacket = AdbPacket(
-                                    command = AdbCommand.CMD_AUTH,
-                                    arg0 = AdbCommand.AUTH_RSAPUBLICKEY,
-                                    arg1 = 0,
-                                    payload = pubKeyBytes
-                                )
-                                sendPacket(authPubKeyPacket)
-                            }
-                        } else {
-                            throw IllegalStateException("Unexpected AUTH arg0: ${response.arg0}")
+                    when (response.command) {
+                        AdbCommand.CMD_CNXN -> {
+                            negotiatedVersion = response.arg0
+                            val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
+                            _features = parseFeatures(banner)
+                            val connectedState = AdbConnectionState.Connected(banner)
+                            _state.value = connectedState
+                            isHandshakeDone = true
                         }
-                    }
 
-                    else -> {
-                        throw IllegalStateException("Unexpected packet during handshake: 0x${Integer.toHexString(response.command)}")
+                        AdbCommand.CMD_STLS -> {
+                            _state.value = AdbConnectionState.Authenticating
+                            val stlsResponsePacket = AdbPacket(
+                                command = AdbCommand.CMD_STLS,
+                                arg0 = response.arg0,
+                                arg1 = 0,
+                                payload = ByteArray(0)
+                            )
+                            sendPacket(stlsResponsePacket)
+                            socket.startTls(keyManager)
+                            sendPacket(cnxnPacket)
+                        }
+
+                        AdbCommand.CMD_AUTH -> {
+                            _state.value = AdbConnectionState.Authenticating
+                            if (response.arg0 == AdbCommand.AUTH_TOKEN) {
+                                if (!sentSignature) {
+                                    val signature = keyManager.signToken(response.payload)
+                                    val authSignaturePacket = AdbPacket(
+                                        command = AdbCommand.CMD_AUTH,
+                                        arg0 = AdbCommand.AUTH_SIGNATURE,
+                                        arg1 = 0,
+                                        payload = signature
+                                    )
+                                    sendPacket(authSignaturePacket)
+                                    sentSignature = true
+                                } else {
+                                    // 触发手机端“允许 USB 调试吗”弹窗
+                                    val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
+                                    val authPubKeyPacket = AdbPacket(
+                                        command = AdbCommand.CMD_AUTH,
+                                        arg0 = AdbCommand.AUTH_RSAPUBLICKEY,
+                                        arg1 = 0,
+                                        payload = pubKeyBytes
+                                    )
+                                    sendPacket(authPubKeyPacket)
+                                }
+                            } else {
+                                throw IllegalStateException("Unexpected AUTH arg0: ${response.arg0}")
+                            }
+                        }
+
+                        else -> {
+                            throw IllegalStateException("Unexpected packet during handshake: 0x${Integer.toHexString(response.command)}")
+                        }
                     }
                 }
             }
 
-            // 3. 握手成功后，启动后台解复用分发器 Loop
+            // 3. 握手成功，启动后台 Loop 接收解复用数据
             startDispatchLoop()
+
+            // 4. 显式返回 Connected 状态
+            _state.value as AdbConnectionState.Connected
 
         } catch (e: Exception) {
             disconnect()
-            _state.value = AdbConnectionState.Error(e)
+            val errorState = AdbConnectionState.Error(e)
+            _state.value = errorState
             throw e
         }
     }
