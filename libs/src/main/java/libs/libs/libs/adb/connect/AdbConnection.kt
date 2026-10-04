@@ -80,7 +80,6 @@ public class AdbConnection(
 
                     when (response.command) {
                         AdbCommand.CMD_CNXN -> {
-                            // 协商协议版本与最大 Payload 限制 (maxdata)
                             negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
                             val peerMaxData = response.arg1
                             if (peerMaxData > 0) {
@@ -166,14 +165,14 @@ public class AdbConnection(
 
                     val targetLocalId = packet.arg1
 
-                    // A. 判断是否为 pendingOpenRequests 中的响应
+                    // A. Response to pending open request
                     val pendingChannel = pendingOpenRequests[targetLocalId]
                     if (pendingChannel != null) {
                         pendingChannel.send(packet)
                         continue
                     }
 
-                    // B. 判断是否为已有 activeStreams 的响应
+                    // B. Response to active stream
                     val stream = activeStreams[targetLocalId]
                     if (stream != null) {
                         when (packet.command) {
@@ -184,12 +183,13 @@ public class AdbConnection(
                                 stream.incomingChannel.send(packet)
                             }
                             AdbCommand.CMD_CLSE -> {
+                                // Fix: Deliver CMD_CLSE packet before calling closeInternal()
+                                runCatching { stream.incomingChannel.send(packet) }
                                 stream.closeInternal()
-                                stream.incomingChannel.send(packet)
                             }
                         }
                     } else {
-                        // C. 收到非法或已注销 Stream 的 WRTE 数据包，回复 CMD_CLSE 释放设备端资源
+                        // C. Unregistered stream response cleanup
                         if (packet.command == AdbCommand.CMD_WRTE) {
                             val closePacket = AdbPacket(
                                 command = AdbCommand.CMD_CLSE,
@@ -229,7 +229,6 @@ public class AdbConnection(
         }
 
         val isDelayedAck = hasFeature("delayed_ack")
-        // delayed_ack 模式下 OPEN 报文的 arg1 传递本地初始接收窗口大小
         val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
 
         val openPacket = AdbPacket(
@@ -250,7 +249,6 @@ public class AdbConnection(
             if (response.command == AdbCommand.CMD_OKAY) {
                 val remoteId = response.arg0
 
-                // delayed_ack 下设备返回的 OKAY payload 中包含 4 字节的初始发送配额
                 val initialTxCredit = if (isDelayedAck && response.payload.size == 4) {
                     ByteBuffer.wrap(response.payload).order(ByteOrder.LITTLE_ENDIAN).int.toLong()
                 } else {

@@ -60,7 +60,10 @@ public class AdbSocket {
             init(keyStore, KEY_PASSWORD.toCharArray())
         }
 
-        val origKm = kmf.keyManagers.first { it is X509ExtendedKeyManager } as X509ExtendedKeyManager
+        // Fix: Safe key manager lookup preventing NoSuchElementException
+        val origKm = kmf.keyManagers.filterIsInstance<X509ExtendedKeyManager>().firstOrNull()
+            ?: throw IllegalStateException("No X509ExtendedKeyManager found")
+
         val forceKm = ForceAliasKeyManager(origKm, CLIENT_ALIAS)
 
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
@@ -106,10 +109,10 @@ public class AdbSocket {
             delegate.chooseEngineServerAlias(keyType, issuers, engine)
 
         override fun getCertificateChain(alias: String?): Array<out X509Certificate>? =
-            delegate.getCertificateChain(alias)
+            delegate.getCertificateChain(alias ?: this.alias)
 
         override fun getPrivateKey(alias: String?): PrivateKey? =
-            delegate.getPrivateKey(alias)
+            delegate.getPrivateKey(alias ?: this.alias)
     }
 
     private fun readExactly(buffer: ByteArray, length: Int) {
@@ -124,9 +127,6 @@ public class AdbSocket {
         }
     }
 
-    /**
-     * 从 Socket 中读取报文包，带有 maxPayloadCap 边界防护
-     */
     public suspend fun readPacket(maxPayloadCap: Int = AdbCommand.CONNECT_MAXDATA): AdbPacket = withContext(Dispatchers.IO) {
         val headerBytes = ByteArray(AdbPacket.HEADER_SIZE)
         readExactly(headerBytes, AdbPacket.HEADER_SIZE)
