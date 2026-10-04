@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 public class AdbConnection(
@@ -43,12 +44,12 @@ public class AdbConnection(
     private val pendingOpenRequests = ConcurrentHashMap<Int, Channel<AdbPacket>>()
 
     private var dispatchJob: Job? = null
-    private val isCleanedUp = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val isCleanedUp = AtomicBoolean(false)
 
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
     public val isSkipChecksum: Boolean 
-        get() = negotiatedVersion >= AdbCommand.A_VERSION_SKIP_CHECKSUM
+        get() = true // TLS 链路上默认跳过 CRC32 校验
 
     public suspend fun connect(
         host: String,
@@ -61,7 +62,8 @@ public class AdbConnection(
             _state.value = AdbConnectionState.Connecting
 
             val connectedState: AdbConnectionState.Connected = withTimeout(timeoutMs) {
-                socket.connect(host, port, timeoutMs.toInt())
+                // 直接建立 TLS 加密 Socket 连接
+                socket.connect(host, port, keyManager, timeoutMs.toInt())
 
                 val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
                 val cnxnPacket = AdbPacket(
@@ -72,76 +74,24 @@ public class AdbConnection(
                 )
                 sendPacket(cnxnPacket)
 
-                var isHandshakeDone = false
-                var sentSignature = false
-                var finalConnectedState: AdbConnectionState.Connected? = null
-
-                while (!isHandshakeDone) {
-                    val response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
-
-                    when (response.command) {
-                        AdbCommand.CMD_CNXN -> {
-                            negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
-                            val peerMaxData = response.arg1
-                            if (peerMaxData > 0) {
-                                negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.CONNECT_MAXDATA)
-                            }
-
-                            val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
-                            _features = parseFeatures(banner)
-                            val state = AdbConnectionState.Connected(banner)
-                            _state.value = state
-                            finalConnectedState = state
-                            isHandshakeDone = true
-                        }
-
-                        AdbCommand.CMD_STLS -> {
-                            _state.value = AdbConnectionState.Authenticating
-                            val stlsResponsePacket = AdbPacket(
-                                command = AdbCommand.CMD_STLS,
-                                arg0 = response.arg0,
-                                arg1 = 0,
-                                payload = ByteArray(0)
-                            )
-                            sendPacket(stlsResponsePacket)
-                            socket.startTls(keyManager)
-                            sendPacket(cnxnPacket)
-                        }
-
-                        AdbCommand.CMD_AUTH -> {
-                            _state.value = AdbConnectionState.Authenticating
-                            if (response.arg0 == AdbCommand.AUTH_TOKEN) {
-                                if (!sentSignature) {
-                                    val signature = keyManager.signToken(response.payload)
-                                    val authSignaturePacket = AdbPacket(
-                                        command = AdbCommand.CMD_AUTH,
-                                        arg0 = AdbCommand.AUTH_SIGNATURE,
-                                        arg1 = 0,
-                                        payload = signature
-                                    )
-                                    sendPacket(authSignaturePacket)
-                                    sentSignature = true
-                                } else {
-                                    val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
-                                    val authPubKeyPacket = AdbPacket(
-                                        command = AdbCommand.CMD_AUTH,
-                                        arg0 = AdbCommand.AUTH_RSAPUBLICKEY,
-                                        arg1 = 0,
-                                        payload = pubKeyBytes
-                                    )
-                                    sendPacket(authPubKeyPacket)
-                                }
-                            } else {
-                                throw IllegalStateException("Unexpected AUTH arg0: ${response.arg0}")
-                            }
-                        }
-
-                        else -> {
-                            throw IllegalStateException("Unexpected packet during handshake: 0x${Integer.toHexString(response.command)}")
-                        }
-                    }
+                // TLS 链路上直接等待对端响应 CNXN 报文
+                val response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
+                if (response.command != AdbCommand.CMD_CNXN) {
+                    throw IllegalStateException("Unexpected packet during TLS handshake: 0x${Integer.toHexString(response.command)}")
                 }
-                finalConnectedState ?: throw IllegalStateException("Handshake finished without Connected state")
+
+                negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
+                val peerMaxData = response.arg1
+                if (peerMaxData > 0) {
+                    negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.CONNECT_MAXDATA)
+                }
+
+                val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
+                _features = parseFeatures(banner)
+                
+                val state = AdbConnectionState.Connected(banner)
+                _state.value = state
+                state
             }
 
             startDispatchLoop()
@@ -182,7 +132,7 @@ public class AdbConnection(
                         continue
                     }
 
-                    // 2. 路由给正在等待 OPEN 响应的 Request (非阻塞 trySend 避免死锁)
+                    // 2. 路由给正在等待 OPEN 响应的 Request
                     val pendingChannel = pendingOpenRequests[targetLocalId]
                     if (pendingChannel != null) {
                         pendingChannel.trySend(packet)
