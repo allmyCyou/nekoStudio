@@ -12,17 +12,18 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.security.KeyStore
 import java.security.Principal
 import java.security.PrivateKey
+import java.security.Provider
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.Arrays
-import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.TrustManager
 import javax.net.ssl.X509ExtendedKeyManager
+import javax.net.ssl.X509TrustManager
 
 public class AdbPairingClient(
     private val keyManager: AdbKeyManager
@@ -49,26 +50,42 @@ public class AdbPairingClient(
                 rawSocket.tcpNoDelay = true
                 rawSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
 
-                // 1. 配置 TLS v1.3 双向认证通道
+                // 1. 配置 TLS v1.3 通道（使用纯内存 KeyManager，避免 KeyStore 和 BC Provider 踩坑）
                 val keyPair = keyManager.getKeyPair()
                 val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
 
-                val keyStore = KeyStore.getInstance("PKCS12").apply {
-                    load(null, null)
-                    setKeyEntry(CLIENT_ALIAS, keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
+                val directKeyManager = object : X509ExtendedKeyManager() {
+                    override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String> =
+                        arrayOf(CLIENT_ALIAS)
+
+                    override fun chooseClientAlias(keyTypes: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String =
+                        CLIENT_ALIAS
+
+                    override fun chooseEngineClientAlias(keyTypes: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?): String =
+                        CLIENT_ALIAS
+
+                    override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? = null
+                    override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?): String? = null
+                    override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?): String? = null
+
+                    override fun getCertificateChain(alias: String?): Array<X509Certificate> = arrayOf(cert)
+                    override fun getPrivateKey(alias: String?): PrivateKey = keyPair.private
                 }
 
-                val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
-                    init(keyStore, KEY_PASSWORD.toCharArray())
+                // 优先使用 Android 系统原生的 Conscrypt Provider
+                val sslContext = try {
+                    val providerClass = Class.forName("org.conscrypt.OpenSSLProvider")
+                    val provider = providerClass.getDeclaredConstructor().newInstance() as Provider
+                    SSLContext.getInstance("TLSv1.3", provider)
+                } catch (_: Throwable) {
+                    SSLContext.getInstance("TLSv1.3")
                 }
 
-                val origKm = kmf.keyManagers.filterIsInstance<X509ExtendedKeyManager>().firstOrNull()
-                    ?: throw IllegalStateException("No X509ExtendedKeyManager found")
-                val forceKm = ForceAliasKeyManager(origKm, CLIENT_ALIAS)
-
-                val sslContext = SSLContext.getInstance("TLSv1.3").apply {
-                    init(arrayOf(forceKm), arrayOf(AdbPairingTrustManager()), SecureRandom())
-                }
+                sslContext.init(
+                    arrayOf(directKeyManager),
+                    arrayOf<TrustManager>(AdbPairingTrustManager()),
+                    SecureRandom()
+                )
 
                 val sslSocket = sslContext.socketFactory.createSocket(
                     rawSocket, host, port, true
@@ -81,7 +98,7 @@ public class AdbPairingClient(
                 sslSocket.use { tlsSocket ->
                     tlsSocket.startHandshake()
 
-                    // 2. 导出 Keying Material 并组合配对密码 (要求 label 为 "adb-label"，长度 64 字节)
+                    // 2. 导出 Keying Material 并组合配对密码
                     val keyMaterial = exportKeyingMaterial(tlsSocket, EXPORTED_KEY_LABEL, EXPORT_KEY_SIZE)
                     val rawCodeBytes = pairingCode.toByteArray(Charsets.UTF_8)
                     val fullPassword = ByteArray(rawCodeBytes.size + keyMaterial.size)
@@ -185,44 +202,15 @@ public class AdbPairingClient(
         return method.invoke(null, sslSocket, label, null as ByteArray?, length) as ByteArray
     }
 
-    private class ForceAliasKeyManager(
-        private val delegate: X509ExtendedKeyManager,
-        private val alias: String
-    ) : X509ExtendedKeyManager() {
-
-        override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String = alias
-
-        override fun chooseEngineClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?): String = alias
-
-        override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String> = arrayOf(alias)
-
-        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
-            delegate.getServerAliases(keyType, issuers)
-
-        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?): String? =
-            delegate.chooseServerAlias(keyType, issuers, socket)
-
-        override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
-            delegate.chooseEngineServerAlias(keyType, issuers, engine)
-
-        override fun getCertificateChain(alias: String?): Array<out X509Certificate>? =
-            delegate.getCertificateChain(this.alias)
-
-        override fun getPrivateKey(alias: String?): PrivateKey? =
-            delegate.getPrivateKey(this.alias)
-    }
-
     companion object {
         private const val CONNECT_TIMEOUT_MS = 10000
         private const val READ_TIMEOUT_MS = 10000
-        private const val KEY_PASSWORD = "adb_pair_password"
         private const val CLIENT_ALIAS = "adb_pair_client"
 
         private const val HEADER_VERSION: Byte = 1
         private const val HEADER_SIZE = 6
         private const val MAX_PAYLOAD_SIZE = 16384 // 16KB
 
-        // AOSP 规范：Label 严格为 "adb-label"（长度 9 字节）
         private const val EXPORTED_KEY_LABEL = "adb-label"
         private const val EXPORT_KEY_SIZE = 64
     }

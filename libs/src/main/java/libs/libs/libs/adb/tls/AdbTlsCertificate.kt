@@ -13,18 +13,12 @@ import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.math.BigInteger
 import java.security.KeyPair
 import java.security.SecureRandom
-import java.security.Security
 import java.security.cert.X509Certificate
 import java.util.Date
 
 public object AdbTlsCertificate {
 
-    init {
-        // 确保 BouncyCastle Provider 已注册
-        if (Security.getProvider("BC") == null) {
-            Security.addProvider(BouncyCastleProvider())
-        }
-    }
+    private val bcProvider by lazy { BouncyCastleProvider() }
 
     /**
      * 完全对齐 AOSP (system/core/adb/crypto/x509_generator.cpp) 构建自签名 ADB TLS 客户端证书
@@ -75,12 +69,13 @@ public object AdbTlsCertificate {
         )
 
         // 4. 使用 SHA256withRSA 进行自签名
+        // 修复：直接将完整的 Provider 实例传给 Builder，规避字符串名称 "BC" 在 Android 系统中的冲突
         val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider("BC")
+            .setProvider(bcProvider)
             .build(keyPair.private)
 
         return JcaX509CertificateConverter()
-            .setProvider("BC")
+            .setProvider(bcProvider)
             .getCertificate(certBuilder.build(signer))
     }
 }
