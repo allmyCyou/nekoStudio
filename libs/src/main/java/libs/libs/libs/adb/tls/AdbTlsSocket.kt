@@ -3,10 +3,12 @@ package libs.libs.libs.adb.tls
 import libs.libs.libs.adb.key.AdbKeyManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.security.KeyStore
 import java.security.Principal
 import java.security.PrivateKey
@@ -15,6 +17,9 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
+import javax.net.ssl.SSLException
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509ExtendedKeyManager
@@ -62,11 +67,30 @@ public class AdbTlsSocket(
 
             // 握手期间设置超时保护，防止协程卡死
             ssl.soTimeout = handshakeTimeoutMs
+
             try {
                 ssl.startHandshake()
-            } finally {
-                // 握手完成后恢复为 0（无限等待），适应 ADB 长连接
+                // 握手成功后恢复为 0（无限等待），适应 ADB 长连接
                 ssl.soTimeout = 0
+            } catch (e: SSLHandshakeException) {
+                closeQuietly(ssl, rawSocket)
+                throw AdbTlsException.HandshakeFailed(
+                    "ADB TLS 握手失败：设备可能未完成无线调试配对，或拒绝了此证书凭证", e
+                )
+            } catch (e: SSLPeerUnverifiedException) {
+                closeQuietly(ssl, rawSocket)
+                throw AdbTlsException.PeerUnverified("设备端 TLS 身份无法验证", e)
+            } catch (e: SSLException) {
+                closeQuietly(ssl, rawSocket)
+                throw AdbTlsException.ProtocolError("TLS 协议级别异常", e)
+            } catch (e: SocketTimeoutException) {
+                closeQuietly(ssl, rawSocket)
+                throw AdbTlsException.HandshakeTimeout(
+                    "TLS 握手超时：设备在 ${handshakeTimeoutMs}ms 内未响应", e
+                )
+            } catch (e: IOException) {
+                closeQuietly(ssl, rawSocket)
+                throw AdbTlsException.NetworkError("TLS 握手传输层异常: ${e.message}", e)
             }
 
             AdbTlsSocket(ssl)
@@ -82,11 +106,28 @@ public class AdbTlsSocket(
             timeoutMs: Int = 10000
         ): AdbTlsSocket = withContext(Dispatchers.IO) {
             val rawSocket = Socket()
-            rawSocket.tcpNoDelay = true
-            rawSocket.keepAlive = true
-            rawSocket.connect(InetSocketAddress(host, port), timeoutMs)
+            try {
+                rawSocket.tcpNoDelay = true
+                rawSocket.keepAlive = true
+                rawSocket.connect(InetSocketAddress(host, port), timeoutMs)
 
-            startTls(rawSocket, keyManager, autoClose = true, handshakeTimeoutMs = timeoutMs)
+                startTls(rawSocket, keyManager, autoClose = true, handshakeTimeoutMs = timeoutMs)
+            } catch (e: Throwable) {
+                // 如果 TCP 连接或升级过程抛出异常，确保 rawSocket 被正确清理
+                closeQuietly(rawSocket)
+                throw if (e is AdbTlsException) e else AdbTlsException.NetworkError("连接 ADB 服务端失败: ${e.message}", e)
+            }
+        }
+
+        /**
+         * 安全静默关闭资源
+         */
+        private fun closeQuietly(vararg closeables: AutoCloseable?) {
+            for (closeable in closeables) {
+                try {
+                    closeable?.close()
+                } catch (_: Exception) {}
+            }
         }
 
         /**
