@@ -13,12 +13,16 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.KeyStore
+import java.security.Principal
+import java.security.PrivateKey
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.Arrays
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509ExtendedKeyManager
 
 public class AdbPairingClient(
     private val keyManager: AdbKeyManager
@@ -51,15 +55,19 @@ public class AdbPairingClient(
 
                 val keyStore = KeyStore.getInstance("PKCS12").apply {
                     load(null, null)
-                    setKeyEntry("adb_pair_client", keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
+                    setKeyEntry(CLIENT_ALIAS, keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
                 }
 
                 val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
                     init(keyStore, KEY_PASSWORD.toCharArray())
                 }
 
+                val origKm = kmf.keyManagers.filterIsInstance<X509ExtendedKeyManager>().firstOrNull()
+                    ?: throw IllegalStateException("No X509ExtendedKeyManager found")
+                val forceKm = ForceAliasKeyManager(origKm, CLIENT_ALIAS)
+
                 val sslContext = SSLContext.getInstance("TLSv1.3").apply {
-                    init(kmf.keyManagers, arrayOf(AdbPairingTrustManager()), SecureRandom())
+                    init(arrayOf(forceKm), arrayOf(AdbPairingTrustManager()), SecureRandom())
                 }
 
                 val sslSocket = sslContext.socketFactory.createSocket(
@@ -73,7 +81,7 @@ public class AdbPairingClient(
                 sslSocket.use { tlsSocket ->
                     tlsSocket.startHandshake()
 
-                    // 2. 导出 Keying Material 并组合配对密码 (要求 label 为 "adb-label\0"，长度 64 字节)
+                    // 2. 导出 Keying Material 并组合配对密码 (要求 label 为 "adb-label"，长度 64 字节)
                     val keyMaterial = exportKeyingMaterial(tlsSocket, EXPORTED_KEY_LABEL, EXPORT_KEY_SIZE)
                     val rawCodeBytes = pairingCode.toByteArray(Charsets.UTF_8)
                     val fullPassword = ByteArray(rawCodeBytes.size + keyMaterial.size)
@@ -97,13 +105,13 @@ public class AdbPairingClient(
 
                             spake2Engine.processServerHelloAndDeriveKey(serverHelloPacket.payload)
 
-                            // 5. 构造 8192 字节 Client PeerInfo 并通过 AES-128-GCM 加密发送
+                            // 5. 构造 Client PeerInfo 并通过 AES-128-GCM 加密发送
                             val pubKeyStr = keyManager.getAdbPublicKeyString().trim() + "\n"
                             val clientPeerInfoBytes = AdbProtoUtils.createClientPeerInfo(pubKeyStr)
                             val encryptedPeerInfo = spake2Engine.encryptPayload(clientPeerInfoBytes)
                             sendPacket(outputStream, PairingPacket.Type.PEER_INFO, encryptedPeerInfo)
 
-                            // 6. 接收并解密 Server PeerInfo 响应 (8208 字节：8192 字节 payload + 16 字节 GCM Auth Tag)
+                            // 6. 接收并解密 Server PeerInfo 响应
                             val respPacket = receivePacket(inputStream)
                             require(respPacket.type == PairingPacket.Type.PEER_INFO) {
                                 "Expected PEER_INFO (1), got: ${respPacket.type}"
@@ -158,7 +166,6 @@ public class AdbPairingClient(
         return PairingPacket(type, payload)
     }
 
-    // 如果其他项目使用此项目中的adb库，需要注意，项目中已在 APP 模块中主动调用 HiddenApiBypass.setHiddenApiExemptions 来豁免系统类
     private fun exportKeyingMaterial(sslSocket: SSLSocket, label: String, length: Int): ByteArray {
         val conscryptClass = try {
             Class.forName("com.android.org.conscrypt.Conscrypt")
@@ -178,17 +185,45 @@ public class AdbPairingClient(
         return method.invoke(null, sslSocket, label, null as ByteArray?, length) as ByteArray
     }
 
+    private class ForceAliasKeyManager(
+        private val delegate: X509ExtendedKeyManager,
+        private val alias: String
+    ) : X509ExtendedKeyManager() {
+
+        override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String = alias
+
+        override fun chooseEngineClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?): String = alias
+
+        override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String> = arrayOf(alias)
+
+        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
+            delegate.getServerAliases(keyType, issuers)
+
+        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?): String? =
+            delegate.chooseServerAlias(keyType, issuers, socket)
+
+        override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
+            delegate.chooseEngineServerAlias(keyType, issuers, engine)
+
+        override fun getCertificateChain(alias: String?): Array<out X509Certificate>? =
+            delegate.getCertificateChain(this.alias)
+
+        override fun getPrivateKey(alias: String?): PrivateKey? =
+            delegate.getPrivateKey(this.alias)
+    }
+
     companion object {
         private const val CONNECT_TIMEOUT_MS = 10000
         private const val READ_TIMEOUT_MS = 10000
         private const val KEY_PASSWORD = "adb_pair_password"
+        private const val CLIENT_ALIAS = "adb_pair_client"
 
         private const val HEADER_VERSION: Byte = 1
         private const val HEADER_SIZE = 6
-        private const val MAX_PAYLOAD_SIZE = 2 * PeerInfo.MAX_PEER_INFO_SIZE // 16384 Bytes
+        private const val MAX_PAYLOAD_SIZE = 16384 // 16KB
 
-        // 关键对齐：AOSP 标准定义为 "adb-label\0"，长度为 64 字节
-        private const val EXPORTED_KEY_LABEL = "adb-label\u0000"
+        // AOSP 规范：Label 严格为 "adb-label"（长度 9 字节）
+        private const val EXPORTED_KEY_LABEL = "adb-label"
         private const val EXPORT_KEY_SIZE = 64
     }
 }
