@@ -54,7 +54,7 @@ public class AdbConnection(
     public suspend fun connect(
         host: String,
         port: Int = 5555,
-        systemIdentity: String = "host::host_model=NekoStudio;mobile_model=Android;",
+        systemIdentity: String = "host::nekoStudio;",
         timeoutMs: Long = 10000L
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
         try {
