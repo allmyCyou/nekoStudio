@@ -26,12 +26,13 @@ public object AdbTlsCertificate {
     public fun generateSelfSignedCertificate(
         keyPair: KeyPair,
         commonName: String = "adb",
-        validityDays: Int = 3650
+        validityDays: Int = 7300 // AOSP 默认为大约 20 年 (7300天)
     ): X509Certificate {
+        // AOSP 规范中，NotBefore 强制从 1970-01-01 00:00:00 UTC 开始
+        // 这能极大避免因两台 Android 设备系统时间不同步导致的证书校验失效问题
+        val startDate = Date(0L) 
+        
         val now = System.currentTimeMillis()
-        // 容忍 1 天的时钟偏差
-        val startDate = Date(now - 24 * 60 * 60 * 1000L)
-        // 默认 10 年有效期
         val endDate = Date(now + validityDays * 24 * 60 * 60 * 1000L)
 
         // AOSP 规范：Subject/Issuer 为 CN=adb, O=Android, C=US
@@ -61,15 +62,18 @@ public object AdbTlsCertificate {
             KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment)
         )
 
-        // 3. Extended Key Usage: 关键！必须标注 Client Authentication (id_kp_clientAuth)
+        // 对齐 AOSP 规范的 Extended Key Usage
+        // AOSP 内部在构建时同时塞入了 id_kp_clientAuth 和 id_kp_serverAuth
         certBuilder.addExtension(
             Extension.extendedKeyUsage,
             false,
-            ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth)
+            ExtendedKeyUsage(arrayOf(
+                KeyPurposeId.id_kp_clientAuth,
+                KeyPurposeId.id_kp_serverAuth
+            ))
         )
 
         // 4. 使用 SHA256withRSA 进行自签名
-        // 修复：直接将完整的 Provider 实例传给 Builder，规避字符串名称 "BC" 在 Android 系统中的冲突
         val signer = JcaContentSignerBuilder("SHA256withRSA")
             .setProvider(bcProvider)
             .build(keyPair.private)
