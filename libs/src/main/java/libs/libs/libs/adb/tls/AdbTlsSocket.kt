@@ -62,15 +62,18 @@ public class AdbTlsSocket(
                 rawSocket, host, port, autoClose
             ) as SSLSocket
 
-            // AOSP adbd 强制约束只接受 TLS 1.3
-            ssl.enabledProtocols = arrayOf("TLSv1.3")
+            // AOSP adbd 强制要求 TLS 1.3
+            val supportedProtocols = ssl.supportedProtocols
+            if ("TLSv1.3" in supportedProtocols) {
+                ssl.enabledProtocols = arrayOf("TLSv1.3")
+            }
 
-            // 握手期间设置超时保护，防止协程卡死
+            // 握手期间设置超时保护
             ssl.soTimeout = handshakeTimeoutMs
 
             try {
                 ssl.startHandshake()
-                // 握手成功后恢复为 0（无限等待），适应 ADB 长连接
+                // 握手成功后取消超时（0 代表无限等待，由业务层或 TCP KeepAlive 控制）
                 ssl.soTimeout = 0
             } catch (e: SSLHandshakeException) {
                 closeQuietly(ssl, rawSocket)
@@ -113,15 +116,11 @@ public class AdbTlsSocket(
 
                 startTls(rawSocket, keyManager, autoClose = true, handshakeTimeoutMs = timeoutMs)
             } catch (e: Throwable) {
-                // 如果 TCP 连接或升级过程抛出异常，确保 rawSocket 被正确清理
                 closeQuietly(rawSocket)
                 throw if (e is AdbTlsException) e else AdbTlsException.NetworkError("连接 ADB 服务端失败: ${e.message}", e)
             }
         }
 
-        /**
-         * 安全静默关闭资源
-         */
         private fun closeQuietly(vararg closeables: AutoCloseable?) {
             for (closeable in closeables) {
                 try {
@@ -135,9 +134,10 @@ public class AdbTlsSocket(
          */
         private fun createSslContext(keyManager: AdbKeyManager): SSLContext {
             val keyPair = keyManager.getKeyPair()
-            val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
+            // 如果 KeyManager 内部存有证书直接使用，否则实时生成
+            val cert = keyManager.getCertificate() 
+                ?: AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
 
-            // 显式使用 PKCS12 构建内存 KeyStore
             val keyStore = KeyStore.getInstance("PKCS12").apply {
                 load(null, null)
                 setKeyEntry(CLIENT_ALIAS, keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
@@ -165,7 +165,7 @@ public class AdbTlsSocket(
     }
 
     /**
-     * 强制指定 Client Key Alias，规避 Android JSSE 下隐式匹配失败的问题
+     * 强制指定 Client Key Alias，规避 JSSE 匹配逻辑导致私钥返回 null 的问题
      */
     private class ForceAliasKeyManager(
         private val delegate: X509ExtendedKeyManager,
@@ -187,10 +187,11 @@ public class AdbTlsSocket(
         override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
             delegate.chooseEngineServerAlias(keyType, issuers, engine)
 
+        // 无视 JSSE 传入的别名（如 "RSA"），强制返回我们的指定别名的证书链与私钥
         override fun getCertificateChain(alias: String?): Array<out X509Certificate>? =
-            delegate.getCertificateChain(alias ?: this.alias)
+            delegate.getCertificateChain(this.alias)
 
         override fun getPrivateKey(alias: String?): PrivateKey? =
-            delegate.getPrivateKey(alias ?: this.alias)
+            delegate.getPrivateKey(this.alias)
     }
 }
