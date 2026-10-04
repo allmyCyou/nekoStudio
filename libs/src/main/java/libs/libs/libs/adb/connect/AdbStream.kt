@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong
 public class AdbStream(
     private val connection: AdbConnection,
     public val localId: Int,
-    public var remoteId: Int,
+    public val remoteId: Int,
     private val maxPayloadSize: Int = AdbCommand.MAX_PAYLOAD,
     initialAvailableSendBytes: Long = maxPayloadSize.toLong()
 ) {
@@ -51,16 +51,20 @@ public class AdbStream(
     public suspend fun readNextChunk(): ByteArray? = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext null
 
+        // 1. 如果当前包还有剩余字节，直接返回剩余部分
         val current = currentWritePacket
         if (current != null) {
             val remaining = current.payload.size - packetReadOffset
             val chunk = current.payload.copyOfRange(packetReadOffset, current.payload.size)
             currentWritePacket = null
             packetReadOffset = 0
-            sendAckIfNeeded(remaining)
+            if (delayedAckEnabled) {
+                sendAckForBytes(remaining)
+            }
             return@withContext chunk
         }
 
+        // 2. 拉取新数据包
         val packet = incomingChannel.receiveCatching().getOrNull() ?: return@withContext null
         if (packet.command == AdbCommand.CMD_CLSE) {
             closeInternal()
@@ -68,7 +72,7 @@ public class AdbStream(
         }
 
         val data = packet.payload
-        sendAckIfNeeded(data.size) // 统一调用 Ack 应答逻辑
+        sendAckForBytes(data.size)
         return@withContext data
     }
 
@@ -119,18 +123,6 @@ public class AdbStream(
         if (delayedAckEnabled) {
             val ackPayload = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(byteCount).array()
             val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId, ackPayload)
-            connection.sendPacket(okayPacket)
-        }
-    }
-
-    private suspend fun sendAckIfNeeded(byteCount: Int) {
-        if (delayedAckEnabled) {
-            val ackPayload = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(byteCount).array()
-            val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId, ackPayload)
-            connection.sendPacket(okayPacket)
-        } else {
-            // 标准 ADB 协议：每收到/消费一个 WRTE 数据包，必须向设备回复 CMD_OKAY(localId, remoteId)
-            val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId)
             connection.sendPacket(okayPacket)
         }
     }
@@ -193,10 +185,6 @@ public class AdbStream(
         if (isClosed.compareAndSet(false, true)) {
             performCleanup()
         }
-    }
-
-    internal fun updateRemoteId(id: Int) {
-        this.remoteId = id
     }
 
     private fun performCleanup() {

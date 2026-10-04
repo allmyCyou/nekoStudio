@@ -110,7 +110,7 @@ public class AdbClient(
     public suspend fun connect(
         host: String,
         port: Int = 5555,
-        systemIdentity: String = "host::nekoStudio@adbClient;",
+        systemIdentity: String = "host::;",
         timeoutMs: Long = 10000L
     ): Result<AdbConnectionState.Connected> = runCatching {
         ensureKeyLoaded()

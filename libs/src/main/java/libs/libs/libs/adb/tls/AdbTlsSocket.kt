@@ -50,20 +50,22 @@ public class AdbTlsSocket(
         ): AdbTlsSocket = withContext(Dispatchers.IO) {
             val host = rawSocket.inetAddress?.hostAddress ?: "localhost"
             val port = rawSocket.port
+
             val sslContext = createSslContext(keyManager)
-        
+
             val ssl = sslContext.socketFactory.createSocket(
                 rawSocket, host, port, autoClose
             ) as SSLSocket
 
-            // 必须显式开启 Client Mode 模式！
-            ssl.useClientMode = true
+            // AOSP adbd 强制约束只接受 TLS 1.3
             ssl.enabledProtocols = arrayOf("TLSv1.3")
 
+            // 握手期间设置超时保护，防止协程卡死
             ssl.soTimeout = handshakeTimeoutMs
             try {
                 ssl.startHandshake()
             } finally {
+                // 握手完成后恢复为 0（无限等待），适应 ADB 长连接
                 ssl.soTimeout = 0
             }
 

@@ -53,7 +53,7 @@ public class AdbConnection(
     public suspend fun connect(
         host: String,
         port: Int = 5555,
-        systemIdentity: String = "host::nekoStudio@adbClient;",
+        systemIdentity: String = "host::;",
         timeoutMs: Long = 10000L
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
         try {
@@ -84,7 +84,7 @@ public class AdbConnection(
                             negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
                             val peerMaxData = response.arg1
                             if (peerMaxData > 0) {
-                                negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.MAX_PAYLOAD)
+                                negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.CONNECT_MAXDATA)
                             }
 
                             val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
@@ -208,9 +208,9 @@ public class AdbConnection(
 
     private fun parseFeatures(banner: String): Set<String> {
         val featuresSegment = banner.split(';')
-            .firstOrNull { it.contains("features=") } ?: return emptySet()
+            .firstOrNull { it.startsWith("features=") } ?: return emptySet()
 
-        return featuresSegment.substringAfter("features=")
+        return featuresSegment.removePrefix("features=")
             .split(',')
             .filter { it.isNotBlank() }
             .toSet()
@@ -220,6 +220,7 @@ public class AdbConnection(
         check(state.value is AdbConnectionState.Connected) { "ADB Connection is not active" }
 
         val localId = localIdGenerator.getAndIncrement()
+
         val destBytes = if (destination.endsWith("\u0000")) {
             destination.toByteArray(Charsets.UTF_8)
         } else {
@@ -227,45 +228,44 @@ public class AdbConnection(
         }
 
         val isDelayedAck = hasFeature("delayed_ack")
-        val openChannel = Channel<AdbPacket>(1)
-
-        // 提前构建 Stream 并直接放入 activeStreams，防止 CMD_WRTE 在 CMD_OKAY 之后瞬间到达触发误杀
-        val stream = AdbStream(
-            connection = this@AdbConnection,
-            localId = localId,
-            remoteId = 0, // 收到 CMD_OKAY 后更新
-            maxPayloadSize = negotiatedMaxPayloadSize,
-            initialAvailableSendBytes = negotiatedMaxPayloadSize.toLong()
-        )
-
-        activeStreams[localId] = stream
-        pendingOpenRequests[localId] = openChannel
+        val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
 
         val openPacket = AdbPacket(
             command = AdbCommand.CMD_OPEN,
             arg0 = localId,
-            arg1 = if (isDelayedAck) negotiatedMaxPayloadSize else 0,
+            arg1 = initialRxWindow,
             payload = destBytes
         )
 
+        val openChannel = Channel<AdbPacket>(1)
+        pendingOpenRequests[localId] = openChannel
+
         try {
             sendPacket(openPacket)
-            val response = openChannel.receiveCatching().getOrNull() ?: run {
-                activeStreams.remove(localId)
-                return@withContext null
-            }
+
+            val response = openChannel.receiveCatching().getOrNull() ?: return@withContext null
 
             if (response.command == AdbCommand.CMD_OKAY) {
                 val remoteId = response.arg0
-                stream.updateRemoteId(remoteId)
+
+                val initialTxCredit = if (isDelayedAck && response.payload.size == 4) {
+                    ByteBuffer.wrap(response.payload).order(ByteOrder.LITTLE_ENDIAN).int.toLong()
+                } else {
+                    negotiatedMaxPayloadSize.toLong()
+                }
+
+                val stream = AdbStream(
+                    connection = this@AdbConnection,
+                    localId = localId,
+                    remoteId = remoteId,
+                    maxPayloadSize = negotiatedMaxPayloadSize,
+                    initialAvailableSendBytes = initialTxCredit
+                )
+                activeStreams[localId] = stream
                 return@withContext stream
             } else {
-                activeStreams.remove(localId)
                 return@withContext null
             }
-        } catch (e: Exception) {
-            activeStreams.remove(localId)
-            throw e
         } finally {
             pendingOpenRequests.remove(localId)
             openChannel.close()
