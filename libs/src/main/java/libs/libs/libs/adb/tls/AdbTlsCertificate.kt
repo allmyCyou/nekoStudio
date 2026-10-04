@@ -13,7 +13,7 @@ import java.util.Date
 public object AdbTlsCertificate {
 
     /**
-     * 根据 keyPair 动态生成自签名 X.509 证书（符合 AOSP ADB TLS 客户端凭证规范）
+     * 根据 KeyPair 动态生成自签名 X.509 证书（符合 AOSP ADB TLS 客户端凭证规范）
      */
     public fun generateSelfSignedCertificate(keyPair: KeyPair): X509Certificate {
         val now = System.currentTimeMillis()

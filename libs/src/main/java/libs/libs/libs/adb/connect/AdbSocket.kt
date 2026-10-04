@@ -3,116 +3,57 @@ package libs.libs.libs.adb.connect
 import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.public.AdbCommand
 import libs.libs.libs.adb.public.AdbPacket
-import libs.libs.libs.adb.tls.AdbTlsCertificate
+import libs.libs.libs.adb.tls.AdbTlsSocket
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.security.Principal
-import java.security.PrivateKey
-import java.security.KeyStore
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
-import javax.net.ssl.KeyManagerFactory
-import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLEngine
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
-import javax.net.ssl.X509ExtendedKeyManager
 
 public class AdbSocket {
 
-    private var socket: Socket? = null
+    private var rawSocket: Socket? = null
+    private var tlsSocket: AdbTlsSocket? = null
+
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
 
+    // 写操作并发锁，防止多协程写入时字节流交错破坏 ADB 帧结构
+    private val writeMutex = Mutex()
+
+    public val isTls: Boolean get() = tlsSocket != null
+
+    /**
+     * 建立基础 TCP Socket 连接
+     */
     public suspend fun connect(host: String, port: Int, timeoutMs: Int = 10000) = withContext(Dispatchers.IO) {
         close()
         val s = Socket()
         s.connect(InetSocketAddress(host, port), timeoutMs)
-        
+
         s.tcpNoDelay = true
         s.keepAlive = true
-        s.soTimeout = 0
-        
-        this@AdbSocket.socket = s
+        s.soTimeout = 0 // ADB 长连接设为 0，防止空闲接收超时
+
+        this@AdbSocket.rawSocket = s
         this@AdbSocket.inputStream = s.getInputStream()
         this@AdbSocket.outputStream = s.getOutputStream()
     }
 
-    public suspend fun startTls(keyManager: AdbKeyManager) = withContext(Dispatchers.IO) {
-        val rawSocket = socket ?: throw IllegalStateException("Socket is not connected")
-        val host = rawSocket.inetAddress?.hostAddress ?: "localhost"
-        val port = rawSocket.port
+    /**
+     * 将当前 Socket 原位升级为 TLS 加密流
+     */
+    public suspend fun startTls(keyManager: AdbKeyManager, handshakeTimeoutMs: Int = 10000) = withContext(Dispatchers.IO) {
+        val s = rawSocket ?: throw IllegalStateException("Socket is not connected")
+        check(tlsSocket == null) { "TLS has already been enabled on this socket" }
 
-        val keyPair = keyManager.getKeyPair()
-        val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
-
-        val keyStore = KeyStore.getInstance("PKCS12").apply {
-            load(null, null)
-            setKeyEntry(CLIENT_ALIAS, keyPair.private, KEY_PASSWORD.toCharArray(), arrayOf<X509Certificate>(cert))
-        }
-
-        val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
-            init(keyStore, KEY_PASSWORD.toCharArray())
-        }
-
-        // Fix: Safe key manager lookup preventing NoSuchElementException
-        val origKm = kmf.keyManagers.filterIsInstance<X509ExtendedKeyManager>().firstOrNull()
-            ?: throw IllegalStateException("No X509ExtendedKeyManager found")
-
-        val forceKm = ForceAliasKeyManager(origKm, CLIENT_ALIAS)
-
-        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-        })
-
-        val sslContext = SSLContext.getInstance("TLSv1.3").apply {
-            init(arrayOf(forceKm), trustAllCerts, SecureRandom())
-        }
-
-        val ssl = sslContext.socketFactory.createSocket(
-            rawSocket, host, port, true
-        ) as SSLSocket
-
-        ssl.enabledProtocols = arrayOf("TLSv1.3", "TLSv1.2")
-        ssl.startHandshake()
-
-        this@AdbSocket.socket = ssl
-        this@AdbSocket.inputStream = ssl.inputStream
-        this@AdbSocket.outputStream = ssl.outputStream
-    }
-
-    private class ForceAliasKeyManager(
-        private val delegate: X509ExtendedKeyManager,
-        private val alias: String
-    ) : X509ExtendedKeyManager() {
-
-        override fun chooseClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, socket: Socket?): String = alias
-
-        override fun chooseEngineClientAlias(keyType: Array<out String>?, issuers: Array<out Principal>?, engine: SSLEngine?): String = alias
-
-        override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String> = arrayOf(alias)
-
-        override fun getServerAliases(keyType: String?, issuers: Array<out Principal>?): Array<String>? =
-            delegate.getServerAliases(keyType, issuers)
-
-        override fun chooseServerAlias(keyType: String?, issuers: Array<out Principal>?, socket: Socket?): String? =
-            delegate.chooseServerAlias(keyType, issuers, socket)
-
-        override fun chooseEngineServerAlias(keyType: String?, issuers: Array<out Principal>?, engine: SSLEngine?): String? =
-            delegate.chooseEngineServerAlias(keyType, issuers, engine)
-
-        override fun getCertificateChain(alias: String?): Array<out X509Certificate>? =
-            delegate.getCertificateChain(alias ?: this.alias)
-
-        override fun getPrivateKey(alias: String?): PrivateKey? =
-            delegate.getPrivateKey(alias ?: this.alias)
+        val tls = AdbTlsSocket.startTls(s, keyManager, autoClose = true, handshakeTimeoutMs = handshakeTimeoutMs)
+        this@AdbSocket.tlsSocket = tls
+        this@AdbSocket.inputStream = tls.inputStream
+        this@AdbSocket.outputStream = tls.outputStream
     }
 
     private fun readExactly(buffer: ByteArray, length: Int) {
@@ -127,14 +68,17 @@ public class AdbSocket {
         }
     }
 
+    /**
+     * 读取并解析 AdbPacket，对 Header Magic 与 Payload 上限进行严格防爆校验
+     */
     public suspend fun readPacket(maxPayloadCap: Int = AdbCommand.CONNECT_MAXDATA): AdbPacket = withContext(Dispatchers.IO) {
         val headerBytes = ByteArray(AdbPacket.HEADER_SIZE)
         readExactly(headerBytes, AdbPacket.HEADER_SIZE)
 
         val header = AdbPacket.parseHeader(headerBytes)
         check(header.isValid) { "Invalid ADB packet header magic check failed" }
-        check(header.dataLength in 0..maxPayloadCap) { 
-            "Invalid ADB payload length: ${header.dataLength} (max=$maxPayloadCap)" 
+        check(header.dataLength in 0..maxPayloadCap) {
+            "Invalid ADB payload length: ${header.dataLength} (max=$maxPayloadCap)"
         }
 
         val payload = if (header.dataLength > 0) {
@@ -151,30 +95,35 @@ public class AdbSocket {
         )
     }
 
-    public suspend fun writePacket(packet: AdbPacket, skipChecksum: Boolean = false) = withContext(Dispatchers.IO) {
+    /**
+     * 线程/协程安全地发送 AdbPacket 数据包
+     */
+    public suspend fun writePacket(packet: AdbPacket, skipChecksum: Boolean = isTls) = withContext(Dispatchers.IO) {
         val stream = outputStream ?: throw IllegalStateException("Socket is not connected")
         val bytes = packet.toByteArray(skipChecksum = skipChecksum)
-        stream.write(bytes)
-        stream.flush()
+
+        // 线程安全互斥写入，保证 Header + Payload 连续不中断
+        writeMutex.withLock {
+            stream.write(bytes)
+            stream.flush()
+        }
     }
 
     public fun close() {
         try {
             inputStream?.close()
             outputStream?.close()
-            socket?.close()
+            tlsSocket?.close()
+            rawSocket?.close()
         } catch (_: Exception) {
         } finally {
             inputStream = null
             outputStream = null
-            socket = null
+            tlsSocket = null
+            rawSocket = null
         }
     }
 
-    public val isConnected: Boolean get() = socket?.isConnected == true && socket?.isClosed == false
-
-    companion object {
-        private const val KEY_PASSWORD = "adb_tls_password"
-        private const val CLIENT_ALIAS = "adb_client_key"
-    }
+    public val isConnected: Boolean
+        get() = tlsSocket?.isConnected ?: (rawSocket?.isConnected == true && rawSocket?.isClosed == false)
 }

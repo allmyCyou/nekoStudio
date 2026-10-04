@@ -4,6 +4,8 @@ import libs.libs.libs.adb.public.AdbCommand
 import libs.libs.libs.adb.public.AdbPacket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.nio.ByteBuffer
@@ -20,6 +22,7 @@ public class AdbStream(
 ) {
     private val isClosed = AtomicBoolean(false)
     private val delayedAckEnabled: Boolean = connection.hasFeature("delayed_ack")
+    private val streamWriteMutex = Mutex()
 
     private val availableSendBytes = AtomicLong(
         if (delayedAckEnabled) initialAvailableSendBytes else 0L
@@ -42,9 +45,26 @@ public class AdbStream(
 
     public suspend fun read(): ByteArray? = readNextChunk()
 
+    /**
+     * 读取下一个数据块（优先消费当前未读完的包缓冲）
+     */
     public suspend fun readNextChunk(): ByteArray? = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext null
 
+        // 1. 如果当前包还有剩余字节，直接返回剩余部分
+        val current = currentWritePacket
+        if (current != null) {
+            val remaining = current.payload.size - packetReadOffset
+            val chunk = current.payload.copyOfRange(packetReadOffset, current.payload.size)
+            currentWritePacket = null
+            packetReadOffset = 0
+            if (delayedAckEnabled) {
+                sendAckForBytes(remaining)
+            }
+            return@withContext chunk
+        }
+
+        // 2. 拉取新数据包
         val packet = incomingChannel.receiveCatching().getOrNull() ?: return@withContext null
         if (packet.command == AdbCommand.CMD_CLSE) {
             closeInternal()
@@ -56,6 +76,9 @@ public class AdbStream(
         return@withContext data
     }
 
+    /**
+     * 按 Byte 数组填充读取
+     */
     public suspend fun read(sink: ByteArray, offset: Int = 0, byteCount: Int = sink.size): Int = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext -1
 
@@ -69,6 +92,12 @@ public class AdbStream(
             packet = nextPacket
             currentWritePacket = packet
             packetReadOffset = 0
+
+            // 标准 ADB 模式下，收到并解包时立即回传 CMD_OKAY 确认，解除对端阻塞
+            if (!delayedAckEnabled) {
+                val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId)
+                connection.sendPacket(okayPacket)
+            }
         }
 
         val remainingInPacket = packet.payload.size - packetReadOffset
@@ -82,7 +111,11 @@ public class AdbStream(
             packetReadOffset = 0
         }
 
-        sendAckForBytes(bytesToRead)
+        // delayed_ack 模式下，按实际消费的字节数累计回传窗口 credit
+        if (delayedAckEnabled) {
+            sendAckForBytes(bytesToRead)
+        }
+
         return@withContext bytesToRead
     }
 
@@ -91,53 +124,50 @@ public class AdbStream(
             val ackPayload = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(byteCount).array()
             val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId, ackPayload)
             connection.sendPacket(okayPacket)
-        } else {
-            if (currentWritePacket == null) {
-                val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId)
-                connection.sendPacket(okayPacket)
-            }
         }
     }
 
     public suspend fun write(data: ByteArray, offset: Int = 0, length: Int = data.size) = withContext(Dispatchers.IO) {
         if (isClosed.get()) throw IOException("AdbStream $localId is closed")
 
-        var remaining = length
-        var currentOffset = offset
+        // 加锁保护写操作，防止并发写时 ACK 错乱
+        streamWriteMutex.withLock {
+            var remaining = length
+            var currentOffset = offset
 
-        while (remaining > 0) {
-            if (delayedAckEnabled) {
-                while (availableSendBytes.get() <= 0) {
-                    val grantedCredit = ackQuotaChannel.receiveCatching().getOrNull()
-                        ?: throw IOException("Stream $localId closed while waiting for delayed ACK")
-                    availableSendBytes.addAndGet(grantedCredit.toLong())
+            while (remaining > 0) {
+                if (delayedAckEnabled) {
+                    while (availableSendBytes.get() <= 0) {
+                        val grantedCredit = ackQuotaChannel.receiveCatching().getOrNull()
+                            ?: throw IOException("Stream $localId closed while waiting for delayed ACK")
+                        availableSendBytes.addAndGet(grantedCredit.toLong())
+                    }
                 }
-            }
 
-            // Fix: 严格根据对端剩余额度计算 chunkSize，防止溢出对端接收窗口
-            val currentWindow = if (delayedAckEnabled) availableSendBytes.get().toInt() else maxPayloadSize
-            val chunkSize = minOf(remaining, maxPayloadSize, currentWindow.coerceAtLeast(1))
+                val currentWindow = if (delayedAckEnabled) availableSendBytes.get().toInt() else maxPayloadSize
+                val chunkSize = minOf(remaining, maxPayloadSize, currentWindow.coerceAtLeast(1))
 
-            val payload = if (offset == 0 && length == data.size && chunkSize == data.size) {
-                data
-            } else {
-                data.copyOfRange(currentOffset, currentOffset + chunkSize)
-            }
-
-            val writePacket = AdbPacket(AdbCommand.CMD_WRTE, localId, remoteId, payload)
-            connection.sendPacket(writePacket)
-
-            if (delayedAckEnabled) {
-                availableSendBytes.addAndGet(-chunkSize.toLong())
-            } else {
-                val ack = ackQuotaChannel.receiveCatching()
-                if (ack.isFailure || isClosed.get()) {
-                    throw IOException("Stream $localId closed while waiting for write ACK")
+                val payload = if (offset == 0 && length == data.size && chunkSize == data.size) {
+                    data
+                } else {
+                    data.copyOfRange(currentOffset, currentOffset + chunkSize)
                 }
-            }
 
-            remaining -= chunkSize
-            currentOffset += chunkSize
+                val writePacket = AdbPacket(AdbCommand.CMD_WRTE, localId, remoteId, payload)
+                connection.sendPacket(writePacket)
+
+                if (delayedAckEnabled) {
+                    availableSendBytes.addAndGet(-chunkSize.toLong())
+                } else {
+                    val ack = ackQuotaChannel.receiveCatching()
+                    if (ack.isFailure || isClosed.get()) {
+                        throw IOException("Stream $localId closed while waiting for write ACK")
+                    }
+                }
+
+                remaining -= chunkSize
+                currentOffset += chunkSize
+            }
         }
     }
 
