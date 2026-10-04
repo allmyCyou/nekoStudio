@@ -79,14 +79,14 @@ public class AdbTlsSocket(
             } catch (e: SSLHandshakeException) {
                 closeQuietly(ssl, rawSocket)
                 throw AdbTlsException.HandshakeFailed(
-                    "ADB TLS 握手失败：设备可能未完成无线调试配对，或拒绝了此证书凭证", e
+                    "SSLHandshakeException: ${e.message}", e
                 )
             } catch (e: SSLPeerUnverifiedException) {
                 closeQuietly(ssl, rawSocket)
-                throw AdbTlsException.PeerUnverified("设备端 TLS 身份无法验证", e)
+                throw AdbTlsException.PeerUnverified("SSLPeerUnverifiedException: ${e.message}", e)
             } catch (e: SSLException) {
                 closeQuietly(ssl, rawSocket)
-                throw AdbTlsException.ProtocolError("TLS 协议级别异常", e)
+                throw AdbTlsException.ProtocolError("SSLException: ${e.message}", e)
             } catch (e: SocketTimeoutException) {
                 closeQuietly(ssl, rawSocket)
                 throw AdbTlsException.HandshakeTimeout(
