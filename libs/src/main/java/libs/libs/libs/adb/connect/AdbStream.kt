@@ -8,8 +8,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -31,12 +29,12 @@ public class AdbStream(
     internal val incomingChannel = Channel<AdbPacket>(Channel.UNLIMITED)
     internal val ackQuotaChannel = Channel<Int>(Channel.UNLIMITED)
 
-    private var currentWritePacket: AdbPacket? = null
+    private var currentPacket: AdbPacket? = null
     private var packetReadOffset = 0
 
     internal fun onOkayReceived(packet: AdbPacket) {
         val grantedBytes = if (delayedAckEnabled && packet.payload.size == 4) {
-            ByteBuffer.wrap(packet.payload).order(ByteOrder.LITTLE_ENDIAN).int
+            packet.payload.readIntLe()
         } else {
             0
         }
@@ -45,26 +43,20 @@ public class AdbStream(
 
     public suspend fun read(): ByteArray? = readNextChunk()
 
-    /**
-     * 读取下一个数据块（优先消费当前未读完的包缓冲）
-     */
     public suspend fun readNextChunk(): ByteArray? = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext null
 
-        // 1. 如果当前包还有剩余字节，直接返回剩余部分
-        val current = currentWritePacket
+        val current = currentPacket
         if (current != null) {
             val remaining = current.payload.size - packetReadOffset
             val chunk = current.payload.copyOfRange(packetReadOffset, current.payload.size)
-            currentWritePacket = null
+            currentPacket = null
             packetReadOffset = 0
-            if (delayedAckEnabled) {
-                sendAckForBytes(remaining)
-            }
+            
+            ackConsumedBytes(remaining)
             return@withContext chunk
         }
 
-        // 2. 拉取新数据包
         val packet = incomingChannel.receiveCatching().getOrNull() ?: return@withContext null
         if (packet.command == AdbCommand.CMD_CLSE) {
             closeInternal()
@@ -72,17 +64,14 @@ public class AdbStream(
         }
 
         val data = packet.payload
-        sendAckForBytes(data.size)
+        ackConsumedBytes(data.size)
         return@withContext data
     }
 
-    /**
-     * 按 Byte 数组填充读取
-     */
     public suspend fun read(sink: ByteArray, offset: Int = 0, byteCount: Int = sink.size): Int = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext -1
 
-        var packet = currentWritePacket
+        var packet = currentPacket
         if (packet == null) {
             val nextPacket = incomingChannel.receiveCatching().getOrNull() ?: return@withContext -1
             if (nextPacket.command == AdbCommand.CMD_CLSE) {
@@ -90,10 +79,10 @@ public class AdbStream(
                 return@withContext -1
             }
             packet = nextPacket
-            currentWritePacket = packet
+            currentPacket = packet
             packetReadOffset = 0
 
-            // 标准 ADB 模式下，收到并解包时立即回传 CMD_OKAY 确认，解除对端阻塞
+            // 标准 ADB 模式下，接收到 Packet 即发送 CMD_OKAY 解除对端阻塞
             if (!delayedAckEnabled) {
                 val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId)
                 connection.sendPacket(okayPacket)
@@ -107,22 +96,25 @@ public class AdbStream(
         packetReadOffset += bytesToRead
 
         if (packetReadOffset >= packet.payload.size) {
-            currentWritePacket = null
+            currentPacket = null
             packetReadOffset = 0
         }
 
-        // delayed_ack 模式下，按实际消费的字节数累计回传窗口 credit
         if (delayedAckEnabled) {
-            sendAckForBytes(bytesToRead)
+            ackConsumedBytes(bytesToRead)
         }
 
         return@withContext bytesToRead
     }
 
-    private suspend fun sendAckForBytes(byteCount: Int) {
+    private suspend fun ackConsumedBytes(byteCount: Int) {
         if (delayedAckEnabled) {
-            val ackPayload = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(byteCount).array()
+            val ackPayload = byteCount.toIntLeBytes()
             val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId, ackPayload)
+            connection.sendPacket(okayPacket)
+        } else if (currentPacket == null) {
+            // 标准模式下，如果 readNextChunk 一次性消费完该数据包，补充发送 OKAY
+            val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId)
             connection.sendPacket(okayPacket)
         }
     }
@@ -130,7 +122,6 @@ public class AdbStream(
     public suspend fun write(data: ByteArray, offset: Int = 0, length: Int = data.size) = withContext(Dispatchers.IO) {
         if (isClosed.get()) throw IOException("AdbStream $localId is closed")
 
-        // 加锁保护写操作，防止并发写时 ACK 错乱
         streamWriteMutex.withLock {
             var remaining = length
             var currentOffset = offset

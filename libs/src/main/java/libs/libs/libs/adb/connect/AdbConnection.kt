@@ -7,18 +7,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 public class AdbConnection(
@@ -27,7 +24,6 @@ public class AdbConnection(
 ) {
     private val socket = AdbSocket()
     private val localIdGenerator = AtomicInteger(1)
-    private val writeMutex = Mutex()
 
     private val _state = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected)
     public val state: StateFlow<AdbConnectionState> = _state.asStateFlow()
@@ -43,7 +39,7 @@ public class AdbConnection(
     private val pendingOpenRequests = ConcurrentHashMap<Int, Channel<AdbPacket>>()
 
     private var dispatchJob: Job? = null
-    private val isCleanedUp = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val isCleanedUp = AtomicBoolean(false)
 
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
@@ -249,7 +245,7 @@ public class AdbConnection(
                 val remoteId = response.arg0
 
                 val initialTxCredit = if (isDelayedAck && response.payload.size == 4) {
-                    ByteBuffer.wrap(response.payload).order(ByteOrder.LITTLE_ENDIAN).int.toLong()
+                    response.payload.readIntLe().toLong()
                 } else {
                     negotiatedMaxPayloadSize.toLong()
                 }
@@ -276,10 +272,8 @@ public class AdbConnection(
         activeStreams.remove(localId)
     }
 
-    public suspend fun sendPacket(packet: AdbPacket) = withContext(Dispatchers.IO) {
-        writeMutex.withLock {
-            socket.writePacket(packet, skipChecksum = isSkipChecksum)
-        }
+    public suspend fun sendPacket(packet: AdbPacket) {
+        socket.writePacket(packet, skipChecksum = isSkipChecksum)
     }
 
     private fun cleanupOnDisconnected() {
