@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong
 public class AdbStream(
     private val connection: AdbConnection,
     public val localId: Int,
-    public val remoteId: Int,
+    public var remoteId: Int,
     private val maxPayloadSize: Int = AdbCommand.MAX_PAYLOAD,
     initialAvailableSendBytes: Long = maxPayloadSize.toLong()
 ) {
