@@ -16,6 +16,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -33,6 +35,8 @@ public class AdbConnection(
     public val state: StateFlow<AdbConnectionState> = _state.asStateFlow()
 
     private var negotiatedVersion: Int = AdbCommand.A_VERSION
+    public var negotiatedMaxPayloadSize: Int = AdbCommand.MAX_PAYLOAD
+        private set
 
     private var _features: Set<String> = emptySet()
     public val features: Set<String> get() = _features
@@ -72,11 +76,17 @@ public class AdbConnection(
                 var sentSignature = false
 
                 while (!isHandshakeDone) {
-                    val response = socket.readPacket()
+                    val response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
 
                     when (response.command) {
                         AdbCommand.CMD_CNXN -> {
-                            negotiatedVersion = response.arg0
+                            // 协商协议版本与最大 Payload 限制 (maxdata)
+                            negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
+                            val peerMaxData = response.arg1
+                            if (peerMaxData > 0) {
+                                negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.CONNECT_MAXDATA)
+                            }
+
                             val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
                             _features = parseFeatures(banner)
                             val connectedState = AdbConnectionState.Connected(banner)
@@ -149,7 +159,7 @@ public class AdbConnection(
             try {
                 while (socket.isConnected) {
                     val packet = try {
-                        socket.readPacket()
+                        socket.readPacket(negotiatedMaxPayloadSize)
                     } catch (e: Exception) {
                         break
                     }
@@ -168,7 +178,6 @@ public class AdbConnection(
                     if (stream != null) {
                         when (packet.command) {
                             AdbCommand.CMD_OKAY -> {
-                                // 修正：将 OKAY 包完整透传给 Stream，以便解析 delayed_ack 4 字节配额
                                 stream.onOkayReceived(packet)
                             }
                             AdbCommand.CMD_WRTE -> {
@@ -219,10 +228,14 @@ public class AdbConnection(
             "$destination\u0000".toByteArray(Charsets.UTF_8)
         }
 
+        val isDelayedAck = hasFeature("delayed_ack")
+        // delayed_ack 模式下 OPEN 报文的 arg1 传递本地初始接收窗口大小
+        val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
+
         val openPacket = AdbPacket(
             command = AdbCommand.CMD_OPEN,
             arg0 = localId,
-            arg1 = 0,
+            arg1 = initialRxWindow,
             payload = destBytes
         )
 
@@ -236,7 +249,21 @@ public class AdbConnection(
 
             if (response.command == AdbCommand.CMD_OKAY) {
                 val remoteId = response.arg0
-                val stream = AdbStream(this@AdbConnection, localId, remoteId)
+
+                // delayed_ack 下设备返回的 OKAY payload 中包含 4 字节的初始发送配额
+                val initialTxCredit = if (isDelayedAck && response.payload.size == 4) {
+                    ByteBuffer.wrap(response.payload).order(ByteOrder.LITTLE_ENDIAN).int.toLong()
+                } else {
+                    negotiatedMaxPayloadSize.toLong()
+                }
+
+                val stream = AdbStream(
+                    connection = this@AdbConnection,
+                    localId = localId,
+                    remoteId = remoteId,
+                    maxPayloadSize = negotiatedMaxPayloadSize,
+                    initialAvailableSendBytes = initialTxCredit
+                )
                 activeStreams[localId] = stream
                 return@withContext stream
             } else {

@@ -15,15 +15,18 @@ public class AdbStream(
     private val connection: AdbConnection,
     public val localId: Int,
     public val remoteId: Int,
-    private val maxPayloadSize: Int = AdbCommand.MAX_PAYLOAD
+    private val maxPayloadSize: Int = AdbCommand.MAX_PAYLOAD,
+    initialAvailableSendBytes: Long = maxPayloadSize.toLong()
 ) {
     private val isClosed = AtomicBoolean(false)
 
     // 是否开启了 delayed_ack
     private val delayedAckEnabled: Boolean = connection.hasFeature("delayed_ack")
 
-    // 可用发送额度（字节数）。开启 delayed_ack 时初始配额设为 1 个 MAX_PAYLOAD，否则为 0
-    private val availableSendBytes = AtomicLong(if (delayedAckEnabled) maxPayloadSize.toLong() else 0L)
+    // 可用发送额度（字节数）。开启 delayed_ack 时优先使用握手时 OKAY 返回的配额
+    private val availableSendBytes = AtomicLong(
+        if (delayedAckEnabled) initialAvailableSendBytes else 0L
+    )
 
     // 接收解复用分发的 WRTE / CLSE 报文包
     internal val incomingChannel = Channel<AdbPacket>(64)
@@ -122,7 +125,7 @@ public class AdbStream(
     }
 
     /**
-     * 写入数据，自动按 MAX_PAYLOAD 切片并进行滑动窗口背压管理
+     * 写入数据，自动按 maxPayloadSize 切片并进行滑动窗口背压管理
      */
     public suspend fun write(data: ByteArray, offset: Int = 0, length: Int = data.size) = withContext(Dispatchers.IO) {
         if (isClosed.get()) throw IOException("AdbStream $localId is closed")

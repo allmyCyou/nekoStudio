@@ -1,6 +1,7 @@
 package libs.libs.libs.adb.connect
 
 import libs.libs.libs.adb.key.AdbKeyManager
+import libs.libs.libs.adb.public.AdbCommand
 import libs.libs.libs.adb.public.AdbPacket
 import libs.libs.libs.adb.tls.AdbTlsCertificate
 import kotlinx.coroutines.Dispatchers
@@ -33,10 +34,9 @@ public class AdbSocket {
         val s = Socket()
         s.connect(InetSocketAddress(host, port), timeoutMs)
         
-        // --- 保持长连接的关键配置 ---
         s.tcpNoDelay = true
-        s.keepAlive = true // 开启 TCP 保活探针
-        s.soTimeout = 0    // 无限超时，阻塞式 read 由协程的取消或 Socket 关闭来中断
+        s.keepAlive = true
+        s.soTimeout = 0
         
         this@AdbSocket.socket = s
         this@AdbSocket.inputStream = s.getInputStream()
@@ -124,12 +124,18 @@ public class AdbSocket {
         }
     }
 
-    public suspend fun readPacket(): AdbPacket = withContext(Dispatchers.IO) {
+    /**
+     * 从 Socket 中读取报文包，带有 maxPayloadCap 边界防护
+     */
+    public suspend fun readPacket(maxPayloadCap: Int = AdbCommand.CONNECT_MAXDATA): AdbPacket = withContext(Dispatchers.IO) {
         val headerBytes = ByteArray(AdbPacket.HEADER_SIZE)
         readExactly(headerBytes, AdbPacket.HEADER_SIZE)
 
         val header = AdbPacket.parseHeader(headerBytes)
         check(header.isValid) { "Invalid ADB packet header magic check failed" }
+        check(header.dataLength in 0..maxPayloadCap) { 
+            "Invalid ADB payload length: ${header.dataLength} (max=$maxPayloadCap)" 
+        }
 
         val payload = if (header.dataLength > 0) {
             ByteArray(header.dataLength).also { readExactly(it, header.dataLength) }
