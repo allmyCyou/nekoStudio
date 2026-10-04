@@ -134,9 +134,7 @@ public class AdbTlsSocket(
          */
         private fun createSslContext(keyManager: AdbKeyManager): SSLContext {
             val keyPair = keyManager.getKeyPair()
-            // 如果 KeyManager 内部存有证书直接使用，否则实时生成
-            val cert = keyManager.getCertificate() 
-                ?: AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
+            val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
 
             val keyStore = KeyStore.getInstance("PKCS12").apply {
                 load(null, null)
