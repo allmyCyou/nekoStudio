@@ -211,7 +211,7 @@ public class AdbPairingClient(
         private const val HEADER_SIZE = 6
         private const val MAX_PAYLOAD_SIZE = 16384 // 16KB
 
-        private const val EXPORTED_KEY_LABEL = "adb-label"
+        private const val EXPORTED_KEY_LABEL = "adb-label\u0000"
         private const val EXPORT_KEY_SIZE = 64
     }
 }
