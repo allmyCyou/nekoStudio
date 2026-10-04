@@ -11,7 +11,7 @@
 - [x] Shell
 - [ ] adb
   - [x] pair
-  - [ ] connect
+  - [x] connect
   - [ ] disconnect
   - [ ] shell
   - [ ] root

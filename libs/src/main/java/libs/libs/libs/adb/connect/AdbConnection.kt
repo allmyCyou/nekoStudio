@@ -69,7 +69,7 @@ public class AdbConnection(
 
             // 2. 握手 & RSA 鉴权 / TLS 协商阶段
             var isHandshakeDone = false
-            var sentPublicKey = false
+            var sentSignature = false // 标记是否已尝试发送过签名
 
             while (!isHandshakeDone) {
                 val response = socket.readPacket()
@@ -101,8 +101,10 @@ public class AdbConnection(
                     AdbCommand.CMD_AUTH -> {
                         _state.value = AdbConnectionState.Authenticating
 
+                        // 服务端发送 CMD_AUTH 时，arg0 恒为 AUTH_TOKEN (1)
                         if (response.arg0 == AdbCommand.AUTH_TOKEN) {
-                            if (!sentPublicKey) {
+                            if (!sentSignature) {
+                                // 第 1 次收到 Token：使用私钥签名并尝试认证
                                 val signature = keyManager.signToken(response.payload)
                                 val authSignaturePacket = AdbPacket(
                                     command = AdbCommand.CMD_AUTH,
@@ -111,19 +113,21 @@ public class AdbConnection(
                                     payload = signature
                                 )
                                 sendPacket(authSignaturePacket)
+                                sentSignature = true
                             } else {
-                                throw IllegalStateException("ADB Authorization rejected by device.")
+                                // 第 2 次收到 Token：说明签名验证未通过（设备未信任此公钥）
+                                // 必须发送 RSA 公钥，以触发生命周期中的手机屏幕“允许调试”弹窗
+                                val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
+                                val authPubKeyPacket = AdbPacket(
+                                    command = AdbCommand.CMD_AUTH,
+                                    arg0 = AdbCommand.AUTH_RSAPUBLICKEY,
+                                    arg1 = 0,
+                                    payload = pubKeyBytes
+                                )
+                                sendPacket(authPubKeyPacket)
                             }
                         } else {
-                            val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
-                            val authPubKeyPacket = AdbPacket(
-                                command = AdbCommand.CMD_AUTH,
-                                arg0 = AdbCommand.AUTH_RSAPUBLICKEY,
-                                arg1 = 0,
-                                payload = pubKeyBytes
-                            )
-                            sendPacket(authPubKeyPacket)
-                            sentPublicKey = true
+                            throw IllegalStateException("Unexpected AUTH arg0: ${response.arg0}")
                         }
                     }
 
