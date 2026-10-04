@@ -1,18 +1,17 @@
 package libs.libs.libs.adb.tls
 
-import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x500.X500NameBuilder
+import org.bouncycastle.asn1.x500.style.BCStyle
 import org.bouncycastle.asn1.x509.BasicConstraints
-import org.bouncycastle.asn1.x509.ExtendedKeyUsage
 import org.bouncycastle.asn1.x509.Extension
-import org.bouncycastle.asn1.x509.KeyPurposeId
 import org.bouncycastle.asn1.x509.KeyUsage
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils
 import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.math.BigInteger
 import java.security.KeyPair
-import java.security.SecureRandom
 import java.security.cert.X509Certificate
 import java.util.Date
 
@@ -21,59 +20,63 @@ public object AdbTlsCertificate {
     private val bcProvider by lazy { BouncyCastleProvider() }
 
     /**
-     * 完全对齐 AOSP (system/core/adb/crypto/x509_generator.cpp) 构建自签名 ADB TLS 客户端证书
+     * 1:1 完全对齐 AOSP (system/core/adb/crypto/x509_generator.cpp) 构建自签名 ADB TLS 客户端证书
      */
     public fun generateSelfSignedCertificate(
-        keyPair: KeyPair,
-        commonName: String = "adb",
-        validityDays: Int = 7300 // AOSP 默认为大约 20 年 (7300天)
+        keyPair: KeyPair
     ): X509Certificate {
-        // AOSP 规范中，NotBefore 强制从 1970-01-01 00:00:00 UTC 开始
-        // 这能极大避免因两台 Android 设备系统时间不同步导致的证书校验失效问题
-        val startDate = Date(0L) 
-        
         val now = System.currentTimeMillis()
-        val endDate = Date(now + validityDays * 24 * 60 * 60 * 1000L)
+        // NotBefore: 当前时间往前推 1 天，防止客户端与设备间存在微小系统时钟偏差
+        val startDate = Date(now - 86400000L)
+        // NotAfter: 10 年 (AOSP kCertLifetimeSeconds = 10 * 365 * 24 * 60 * 60)
+        val endDate = Date(now + 10L * 365 * 24 * 60 * 60 * 1000L)
 
-        // AOSP 规范：Subject/Issuer 为 CN=adb, O=Android, C=US
-        val dnName = X500Name("CN=$commonName, O=Android, C=US")
-        val serialNumber = BigInteger(64, SecureRandom())
+        // 1. AOSP 规范：Subject/Issuer 字段及顺序 (C=US, O=Android, CN=Adb)
+        val nameBuilder = X500NameBuilder(BCStyle.INSTANCE)
+        nameBuilder.addRDN(BCStyle.C, "US")
+        nameBuilder.addRDN(BCStyle.O, "Android")
+        nameBuilder.addRDN(BCStyle.CN, "Adb") // 注意 CN 为 "Adb" (大写 A)
+        val dnName = nameBuilder.build()
+
+        // 2. AOSP 规范：Serial Number 固认为 1
+        val serialNumber = BigInteger.ONE
 
         val certBuilder = JcaX509v3CertificateBuilder(
             dnName,              // Issuer
-            serialNumber,        // Serial
+            serialNumber,        // Serial (1)
             startDate,           // Not Before
             endDate,             // Not After
             dnName,              // Subject
             keyPair.public       // Public Key
         )
 
-        // 1. Basic Constraints: 声明为终端节点 (CA = false)
+        // 3. AOSP 规范：Basic Constraints -> critical, CA:TRUE
         certBuilder.addExtension(
             Extension.basicConstraints,
             true, // critical
-            BasicConstraints(false)
+            BasicConstraints(true) // CA = true
         )
 
-        // 2. Key Usage: 数字签名与密钥加密
+        // 4. AOSP 规范：Key Usage -> critical, keyCertSign, cRLSign, digitalSignature
         certBuilder.addExtension(
             Extension.keyUsage,
             true, // critical
-            KeyUsage(KeyUsage.digitalSignature or KeyUsage.keyEncipherment)
+            KeyUsage(
+                KeyUsage.keyCertSign or 
+                KeyUsage.cRLSign or 
+                KeyUsage.digitalSignature
+            )
         )
 
-        // 对齐 AOSP 规范的 Extended Key Usage
-        // AOSP 内部在构建时同时塞入了 id_kp_clientAuth 和 id_kp_serverAuth
+        // 5. AOSP 规范：Subject Key Identifier -> hash
+        val extensionUtils = JcaX509ExtensionUtils()
         certBuilder.addExtension(
-            Extension.extendedKeyUsage,
-            false,
-            ExtendedKeyUsage(arrayOf(
-                KeyPurposeId.id_kp_clientAuth,
-                KeyPurposeId.id_kp_serverAuth
-            ))
+            Extension.subjectKeyIdentifier,
+            false, // non-critical
+            extensionUtils.createSubjectKeyIdentifier(keyPair.public)
         )
 
-        // 4. 使用 SHA256withRSA 进行自签名
+        // 6. 签名生成证书 (使用 SHA256withRSA)
         val signer = JcaContentSignerBuilder("SHA256withRSA")
             .setProvider(bcProvider)
             .build(keyPair.private)
