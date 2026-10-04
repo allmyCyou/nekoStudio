@@ -174,10 +174,14 @@ public class AdbKeyManager(
 
     public fun signToken(token: ByteArray): ByteArray {
         val privKey = privateKey ?: throw IllegalStateException("PrivateKey is not loaded")
-        val signer = RSADigestSigner(SHA1Digest())
-        signer.init(true, privKey)
-        signer.update(token, 0, token.size)
-        return signer.generateSignature()
+        return try {
+            val signer = RSADigestSigner(SHA1Digest())
+            signer.init(true, privKey)
+            signer.update(token, 0, token.size)
+            signer.generateSignature()
+        } catch (e: Exception) {
+            throw IllegalStateException("Failed to sign ADB token", e)
+        }
     }
 
     public fun getAdbPublicKeyString(): String {
@@ -189,6 +193,33 @@ public class AdbKeyManager(
         return "$keyStr\u0000".toByteArray(Charsets.UTF_8)
     }
 
+    public fun getKeyPair(): KeyPair {
+        val keyFactory = KeyFactory.getInstance("RSA")
+        val pubSpec = RSAPublicKeySpec(
+            (privateKey as? RSAKeyParameters)?.modulus 
+                ?: throw IllegalStateException("PrivateKey not loaded"),
+            (privateKey as? RSAKeyParameters)?.exponent ?: BigInteger.valueOf(65537)
+        )
+        val javaPublicKey = keyFactory.generatePublic(pubSpec)
+
+        val javaPrivateKey = when (val priv = privateKey) {
+            is RSAPrivateCrtKeyParameters -> {
+                val privSpec = RSAPrivateCrtKeySpec(
+                    priv.modulus, priv.publicExponent, priv.exponent,
+                    priv.p, priv.q, priv.dp, priv.dq, priv.qInv
+                )
+                keyFactory.generatePrivate(privSpec)
+            }
+            is RSAKeyParameters -> {
+                val privSpec = java.security.spec.RSAPrivateKeySpec(priv.modulus, priv.exponent)
+                keyFactory.generatePrivate(privSpec)
+            }
+            else -> throw IllegalStateException("Unsupported or missing private key")
+        }
+
+        return KeyPair(javaPublicKey, javaPrivateKey)
+    }
+/*
     public fun getKeyPair(): KeyPair {
         val privParams = (privateKey as? RSAPrivateCrtKeyParameters)
             ?: throw IllegalStateException("PrivateKey is not loaded or not a valid RSAPrivateCrtKeyParameters")
@@ -215,4 +246,5 @@ public class AdbKeyManager(
 
         return KeyPair(javaPublicKey, javaPrivateKey)
     }
+*/
 }

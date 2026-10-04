@@ -99,35 +99,32 @@ public class AdbConnection(
                     }
 
                     AdbCommand.CMD_AUTH -> {
+                        // TLS 握手完成后如果还收到 AUTH，直接忽略
+                        if (socket.isTlsActive) continue 
+
                         _state.value = AdbConnectionState.Authenticating
 
-                        // 服务端发送 CMD_AUTH 时，arg0 恒为 AUTH_TOKEN (1)
-                        if (response.arg0 == AdbCommand.AUTH_TOKEN) {
-                            if (!sentSignature) {
-                                // 第 1 次收到 Token：使用私钥签名并尝试认证
-                                val signature = keyManager.signToken(response.payload)
-                                val authSignaturePacket = AdbPacket(
-                                    command = AdbCommand.CMD_AUTH,
-                                    arg0 = AdbCommand.AUTH_SIGNATURE,
-                                    arg1 = 0,
-                                    payload = signature
-                                )
-                                sendPacket(authSignaturePacket)
-                                sentSignature = true
-                            } else {
-                                // 第 2 次收到 Token：说明签名验证未通过（设备未信任此公钥）
-                                // 必须发送 RSA 公钥，以触发生命周期中的手机屏幕“允许调试”弹窗
-                                val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
-                                val authPubKeyPacket = AdbPacket(
-                                    command = AdbCommand.CMD_AUTH,
-                                    arg0 = AdbCommand.AUTH_RSAPUBLICKEY,
-                                    arg1 = 0,
-                                    payload = pubKeyBytes
-                                )
-                                sendPacket(authPubKeyPacket)
-                            }
+                        if (sentSignature) {
+                            // 第二次收到 AUTH_TOKEN：说明签名不被信任，发送 RSA 公钥触发手机弹窗
+                            val pubKeyBytes = keyManager.getAdbPublicKeyBytes() // 确保这是 Android ADB pubkey 格式
+                            val authPubKeyPacket = AdbPacket(
+                                command = AdbCommand.CMD_AUTH,
+                                arg0 = AdbCommand.AUTH_RSAPUBLICKEY,
+                                arg1 = 0,
+                                payload = pubKeyBytes
+                            )
+                            sendPacket(authPubKeyPacket)
                         } else {
-                            throw IllegalStateException("Unexpected AUTH arg0: ${response.arg0}")
+                            // 第一次收到 AUTH_TOKEN：签名并发送
+                            val signature = keyManager.signToken(response.payload)
+                            val authSignaturePacket = AdbPacket(
+                                command = AdbCommand.CMD_AUTH,
+                                arg0 = AdbCommand.AUTH_SIGNATURE,
+                                arg1 = 0,
+                                payload = signature
+                            )
+                            sendPacket(authSignaturePacket)
+                            sentSignature = true // 关键：标记已发送过签名！
                         }
                     }
 
