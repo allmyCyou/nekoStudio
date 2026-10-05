@@ -37,8 +37,8 @@ public class AdbShellClient(
         val startTime = System.currentTimeMillis()
         val sentinel = "__ADB_EXIT_CODE_${startTime}__:"
         // 1. \n 被转义为真正的 \n，由远端 printf 解析为换行
-        // 2. ${'$'}? 确保运行时导出纯粹的 $? 由远端 Shell 解释 exit code
-        val wrappedCommand = "($command); printf \"\n$sentinel\%d\" \${'$'}?"
+        // 2. $? 确保运行时导出纯粹的 $? 由远端 Shell 解释 exit code
+        val wrappedCommand = "($command); printf \"\n$sentinel%d\" \$?"
 
         val stream = connection.openStream("exec:$wrappedCommand")
             ?: return@withContext ShellCommandResult(
