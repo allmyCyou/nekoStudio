@@ -20,8 +20,8 @@ public class AdbShellClient(
         // 1. 尝试 Shell V2 执行
         val v2Result = execV2(command)
         
-        // 2. 判断 V2 是否成功建立与执行：若 exitCode 为 -1 且 stderr 提示建流失败/未收到 exit 包，自动回退到 V1
-        if (v2Result.exitCode == -1 && (v2Result.stderr.contains("Failed to open shell_v2 stream") || v2Result.stdout.isEmpty())) {
+        // 2. 仅当 V2 建流失败（不支持 V2 协议）时自动回退到 V1
+        if (v2Result.exitCode == -1 && v2Result.stderr.startsWith("Failed to open shell_v2 stream")) {
             return@withContext execV1(command)
         }
         
@@ -116,31 +116,28 @@ public class AdbShellClient(
      * 读取无损二进制字节数组（优先 Shell V2，降级使用标准 V1 exec 原始流）
      */
     public suspend fun execRawBytes(command: String): ByteArray = withContext(Dispatchers.IO) {
-        // 尝试 V2 模式（无协议损耗）
         val v2Stream = connection.openStream("shell,v2,raw:$command")
         if (v2Stream != null) {
             val stdoutStream = ByteArrayOutputStream()
-            var exitCode = -1
+            var v2Executed = false
             try {
                 readShellV2Stream(v2Stream) { packet ->
                     when (packet.id) {
-                        ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
-                        ShellV2Packet.ID_EXIT -> {
-                            if (packet.payload.isNotEmpty()) {
-                                exitCode = packet.payload[0].toUByte().toInt()
-                            }
+                        ShellV2Packet.ID_STDOUT -> {
+                            v2Executed = true
+                            stdoutStream.write(packet.payload)
                         }
+                        ShellV2Packet.ID_EXIT -> v2Executed = true
                     }
                 }
-                if (exitCode == 0) return@withContext stdoutStream.toByteArray()
+                if (v2Executed) return@withContext stdoutStream.toByteArray()
             } catch (_: Exception) {
-                // V2 读取失败则继续回退 V1
+                // 建流/解析前失败才进行 V1 降级
             } finally {
                 v2Stream.close()
             }
         }
 
-        // 回退 V1 (exec:) 原始流读取
         val v1Stream = connection.openStream("exec:$command")
             ?: throw IllegalStateException("Failed to open exec stream for raw bytes")
 
@@ -164,27 +161,31 @@ public class AdbShellClient(
      * 智能流式传输 Flow（不依赖 Feature，优先 V2 建流，建流失败无缝回退 V1）
      */
     public fun execStream(command: String): Flow<ShellStreamChunk> = flow {
-        // 尝试打开 V2 流
         val v2Stream = connection.openStream("shell,v2,raw:$command")
         if (v2Stream != null) {
-            var v2Success = false
+            var emittedAny = false
             try {
                 readShellV2Stream(v2Stream) { packet ->
-                    v2Success = true
                     when (packet.id) {
-                        ShellV2Packet.ID_STDOUT -> emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
-                        ShellV2Packet.ID_STDERR -> emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
+                        ShellV2Packet.ID_STDOUT -> {
+                            emittedAny = true
+                            emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
+                        }
+                        ShellV2Packet.ID_STDERR -> {
+                            emittedAny = true
+                            emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
+                        }
+                        ShellV2Packet.ID_EXIT -> emittedAny = true
                     }
                 }
-                if (v2Success) return@flow
-            } catch (_: Exception) {
-                // V2 中途解析异常，准备回退 V1
+                if (emittedAny) return@flow
+            } catch (e: Exception) {
+                if (emittedAny) throw e // 已产生输出时中途失败，不允许回退 V1 重新发送
             } finally {
                 v2Stream.close()
             }
         }
 
-        // 降级使用 Exec V1 模式
         val v1Stream = connection.openStream("exec:$command") ?: return@flow
         try {
             while (true) {
@@ -198,9 +199,6 @@ public class AdbShellClient(
         }
     }.flowOn(Dispatchers.IO)
 
-    /**
-     * 通用 Shell V2 数据流读取与轮询辅助函数
-     */
     private suspend inline fun readShellV2Stream(
         stream: AdbStream,
         crossinline onPacket: suspend (ShellV2Packet) -> Unit

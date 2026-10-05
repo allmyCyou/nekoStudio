@@ -1,11 +1,5 @@
 package libs.libs.libs.adb.shell
 
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-
-/**
- * 高性能 Shell V2 拼包解包缓冲区
- */
 public class ShellV2Buffer {
     private var buffer = ByteArray(8192)
     private var head = 0
@@ -28,10 +22,11 @@ public class ShellV2Buffer {
                 ((buffer[head + 3].toInt() and 0xFF) shl 16) or
                 ((buffer[head + 4].toInt() and 0xFF) shl 24)
 
+        require(len >= 0) { "Invalid shell v2 payload size: $len" }
+
         val totalSize = ShellV2Packet.HEADER_SIZE + len
         if (size < totalSize) return null
 
-        // 校验 Device -> Host 合法包 ID (仅允许 STDOUT, STDERR, EXIT)
         require(id == ShellV2Packet.ID_STDOUT || id == ShellV2Packet.ID_STDERR || id == ShellV2Packet.ID_EXIT) {
             "Invalid device-to-host shell packet id: $id"
         }
