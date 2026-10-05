@@ -32,10 +32,10 @@ import androidx.core.net.*
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.window.layout.WindowMetricsCalculator
-/*******************************
+/******************************
 *        kotlinx 协程         *
 *    suspend 都给我挂起     *
-********************************/
+*******************************/
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.*
 import kotlinx.coroutines.flow.*
