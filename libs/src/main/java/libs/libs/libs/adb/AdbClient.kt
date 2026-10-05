@@ -23,6 +23,7 @@ import libs.libs.libs.adb.sync.SyncFlags
 import libs.libs.libs.adb.usb.accessory.AdbUsbAccessoryManager
 import libs.libs.libs.adb.usb.host.AdbUsbHostConnection
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.firstOrNull
@@ -212,36 +213,39 @@ public class AdbClient(
     }
 
     /**
-     * 搜索局域网内所有匹配的 mDNS 服务设备列表
+     * 搜索局域网内所有 mDNS 设备列表（同时并发扫描 CONNECT、PAIRING、LEGACY 等所有类型）
      *
      * @param context Context 实例
-     * @param type 服务类型：AdbMdnsType.CONNECT (调试) 或 AdbMdnsType.PAIRING (配对)
-     * @param scanDurationMs 持续扫描搜索的时间（单位：毫秒）
+     * @param types 需要扫描的服务类型列表，默认并发扫描所有 [AdbMdnsType]
+     * @param scanDurationMs 持续扫描的时间（单位：毫秒）
      */
     public suspend fun mdnsList(
         context: Context,
-        type: AdbMdnsType = AdbMdnsType.CONNECT,
+        types: List<AdbMdnsType> = AdbMdnsType.entries,
         scanDurationMs: Long = 3000L
-    ): List<AdbMdnsServiceInfo> = mdnsList(createMdnsManager(context), type, scanDurationMs)
+    ): List<AdbMdnsServiceInfo> = mdnsList(createMdnsManager(context), types, scanDurationMs)
 
     /**
-     * 通过传入的 AdbMdnsManager 实例搜索局域网内所有 mDNS 服务设备列表
+     * 通过 AdbMdnsManager 实例搜索局域网内所有 mDNS 服务设备列表
      */
     public suspend fun mdnsList(
         mdnsManager: AdbMdnsManager,
-        type: AdbMdnsType = AdbMdnsType.CONNECT,
+        types: List<AdbMdnsType> = AdbMdnsType.entries,
         scanDurationMs: Long = 3000L
     ): List<AdbMdnsServiceInfo> {
-        val list = mutableListOf<AdbMdnsServiceInfo>()
+        val results = mutableListOf<AdbMdnsServiceInfo>()
         withTimeoutOrNull(scanDurationMs) {
-            mdnsManager.discoverServices(type).collect { service ->
-                // 仅收集成功解析出 IP 地址的设备，并防止重名重复添加
-                if (service.ipAddress != null && list.none { it.name == service.name && it.port == service.port }) {
-                    list.add(service)
+            // 合并所有类型 Flow，多通道并发扫描
+            types.map { mdnsManager.discoverServices(it) }
+                .merge()
+                .collect { service ->
+                    // 确保已解析出 IP，并按 IP 与 Port 防重
+                    if (service.ipAddress != null && results.none { it.ipAddress == service.ipAddress && it.port == service.port }) {
+                        results.add(service)
+                    }
                 }
-            }
         }
-        return list
+        return results
     }
 
     public fun disconnect() {

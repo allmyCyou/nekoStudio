@@ -54,6 +54,18 @@ fun CommandHelpBottomSheet(
                         description = "断开无线调试连接"
                     ),
                     CommandOption(
+                        flag = "adb mdns --pair",
+                        description = "仅需配对码即可一键配对无线调试"
+                    ),
+                    CommandOption(
+                        flag = "adb mdns --connect",
+                        description = "一键连接无线调试"
+                    ),
+                    CommandOption(
+                        flag = "adb mdns --list",
+                        description = "扫描附近的 adb 无线设备"
+                    ),
+                    CommandOption(
                         flag = "adb push",
                         description = "推送文件"
                     ),

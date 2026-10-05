@@ -109,8 +109,6 @@ import com.adb.kitty.data.fastboot.*
 import com.adb.kitty.service.*
 import com.adb.kitty.R
 
-import libs.libs.libs.adb.mdns.AdbMdnsType
-
 @Keep
 class MainActivity : ComponentActivity() {
     companion object {
@@ -938,6 +936,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleAdbCommand(adbCmd: String) {
+        // 在调用此方法之前 adb 就已经被 cmd.removePrefix("adb ").trim()，所以后续只需要识别 adb 后面的参数即可
         val client = adbService?.safeAdbClient
         if (client == null) {
             appendLog("[error] ADB可能未初始化")
@@ -953,7 +952,7 @@ class MainActivity : ComponentActivity() {
                     "connect" -> {
                         // 支持: connect 10.45.16.152:5555 或 connect 10.45.16.152 5555
                         val target = tokens.getOrNull(1) ?: run {
-                            appendLog("[error] 请指定 IP 和端口，例: connect 192.168.1.100:5555")
+                            appendLog("[error] 请指定 IP 和端口，例: adb connect 192.168.1.100 5555")
                             return@launch
                         }
 
@@ -998,7 +997,7 @@ class MainActivity : ComponentActivity() {
                             port = parts.getOrNull(1)?.toIntOrNull() ?: 0
                             code = tokens[2]
                         } else {
-                            appendLog("[error] 配对参数格式错误，例: pair 10.45.16.152:42919 088758")
+                            appendLog("[error] 配对参数格式错误，例: adb pair 10.45.16.152 42919 088758")
                             return@launch
                         }
 
@@ -1024,25 +1023,17 @@ class MainActivity : ComponentActivity() {
 
                         when (flag) {
                             "-l", "--list" -> {
-                                val subType = tokens.getOrNull(2)?.lowercase()
-                                val isPairing = subType == "pair" || subType == "-p"
-                                val mdnsType = if (isPairing) AdbMdnsType.PAIRING else AdbMdnsType.CONNECT
-                                val typeName = if (isPairing) "无线配对" else "无线调试"
+                                appendLog("[info] 正在扫描局域网内所有 mDNS 设备 (耗时 3 秒)")
 
-                                appendLog("[info] 正在扫描局域网内的 mDNS $typeName 设备 (扫描 3 秒)...")
-
-                                val devices = client.mdnsList(
-                                    context = context,
-                                    type = mdnsType,
-                                    scanDurationMs = 3000L
-                                )
+                                // 扫描所有类型设备 (CONNECT, PAIRING, LEGACY)
+                                val devices = client.mdnsList(context)
 
                                 if (devices.isEmpty()) {
-                                    appendLog("[info] 未找到任何开启 $typeName 的 mDNS 设备")
+                                    appendLog("[info] 未搜索到任何 mDNS 设备")
                                 } else {
-                                    appendLog("[success] 共找到 ${devices.size} 个 $typeName 设备:")
+                                    appendLog("[success] 搜索完毕，共找到 ${devices.size} 台设备：")
                                     devices.forEachIndexed { index, dev ->
-                                        appendLog("  [${index + 1}] 设备名: ${dev.name} | 地址: ${dev.ipAddress}:${dev.port}")
+                                        appendLog("[${index + 1}] 名称: ${dev.name} | 类型: ${dev.type.name} | IP: ${dev.ipAddress} | 端口: ${dev.port}")
                                     }
                                 }
                             }
@@ -1054,7 +1045,7 @@ class MainActivity : ComponentActivity() {
                                     return@launch
                                 }
                                 val deviceFilter = tokens.getOrNull(3)
-                                appendLog("[info] 正在通过 mDNS 自动搜索设备并尝试配对 (验证码: $code)...")
+                                appendLog("[info] 正在通过 mDNS 自动搜索设备并尝试配对 (验证码: $code)")
 
                                 val result = client.mdnsPair(
                                     context = context,
@@ -1071,7 +1062,7 @@ class MainActivity : ComponentActivity() {
 
                             "-c", "--connect" -> {
                                 val deviceFilter = tokens.getOrNull(2)
-                                appendLog("[info] 正在通过 mDNS 自动搜索局域网内的 ADB 调试设备...")
+                                appendLog("[info] 正在通过 mDNS 自动搜索局域网内的 ADB 调试设备")
 
                                 val result = client.mdnsConnect(
                                     context = context,
@@ -1086,10 +1077,7 @@ class MainActivity : ComponentActivity() {
                             }
 
                             else -> {
-                                appendLog("[error] 未知参数。用法:\n" +
-                                        "  mdns -l [connect|pair] : 扫描设备列表\n" +
-                                        "  mdns -c [设备名]         : 自动搜索并连接调试设备\n" +
-                                        "  mdns -p <配对码> [设备名] : 自动搜索并进行无线配对")
+                                appendLog("[error] 指令不存在")
                             }
                         }
                     }
