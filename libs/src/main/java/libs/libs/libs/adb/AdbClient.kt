@@ -23,7 +23,9 @@ import libs.libs.libs.adb.sync.FileStatV2
 import libs.libs.libs.adb.sync.SyncFlags
 import libs.libs.libs.adb.usb.accessory.AdbUsbAccessoryManager
 import libs.libs.libs.adb.usb.host.AdbUsbHostConnection
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,6 +36,11 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.ExperimentalSerializationApi
 import java.io.File
 import java.io.InputStream
+
+/**
+ * 内部用于提前中断 Flow 收集的控制流异常
+ */
+private class MdnsSuccessException : CancellationException("mDNS operation succeeded")
 
 /**
  * 统一 ADB 客户端门面 (Facade)
@@ -144,19 +151,55 @@ public class AdbClient(
         timeoutMs: Long = 10000L,
         listener: AdbPairingListener? = null
     ): Result<String> = runCatching {
-        val service = withTimeoutOrNull(timeoutMs) {
-            mdnsManager.discoverServices(AdbMdnsType.PAIRING)
-                .firstOrNull { info ->
-                    info.ipAddress != null && (deviceName == null || info.name.contains(deviceName, ignoreCase = true))
-                }
-        } ?: throw IllegalStateException("未在 $timeoutMs ms 内找到匹配的 mDNS 配对服务")
+        val attemptedEndpoints = mutableSetOf<Pair<String, Int>>()
+        val failedLogs = mutableListOf<String>()
+        var successResult: String? = null
 
-        pair(
-            host = service.ipAddress!!,
-            port = service.port,
-            pairingCode = pairingCode,
-            listener = listener
-        ).getOrThrow()
+        try {
+            withTimeoutOrNull(timeoutMs) {
+                mdnsManager.discoverServices(AdbMdnsType.PAIRING)
+                    .collect { service ->
+                        val ip = service.ipAddress ?: return@collect
+                        val port = service.port
+
+                        // 1. 设备名称过滤
+                        if (deviceName != null && !service.name.contains(deviceName, ignoreCase = true)) {
+                            return@collect
+                        }
+
+                        // 2. 按 (IP, Port) 防重，避免对同一端口重复尝试
+                        if (!attemptedEndpoints.add(ip to port)) {
+                            return@collect
+                        }
+
+                        // 3. 尝试进行无线配对
+                        val res = pair(
+                            host = ip,
+                            port = port,
+                            pairingCode = pairingCode,
+                            listener = listener
+                        )
+
+                        if (res.isSuccess) {
+                            successResult = res.getOrThrow()
+                            throw MdnsSuccessException() // 配对成功，终止 Flow 监听
+                        } else {
+                            val errMsg = res.exceptionOrNull()?.message ?: "Pairing failed"
+                            failedLogs.add("$ip:$port ($errMsg)")
+                        }
+                    }
+            }
+        } catch (_: MdnsSuccessException) {
+            // 成功时捕获异常正常退出
+        }
+
+        successResult ?: throw IllegalStateException(
+            if (attemptedEndpoints.isEmpty()) {
+                "未在 $timeoutMs ms 内找到匹配的 mDNS 配对服务"
+            } else {
+                "尝试配对所有匹配的 mDNS 端口均失败: [${failedLogs.joinToString("; ")}]"
+            }
+        )
     }
 
     /**
@@ -207,19 +250,55 @@ public class AdbClient(
         mdnsTimeoutMs: Long = 10000L,
         connectTimeoutMs: Long = 10000L
     ): Result<AdbConnectionState.Connected> = runCatching {
-        val service = withTimeoutOrNull(mdnsTimeoutMs) {
-            mdnsManager.discoverServices(AdbMdnsType.CONNECT)
-                .firstOrNull { info ->
-                    info.ipAddress != null && (deviceName == null || info.name.contains(deviceName, ignoreCase = true))
-                }
-        } ?: throw IllegalStateException("未在 $mdnsTimeoutMs ms 内找到匹配的 mDNS 调试服务")
+        val attemptedEndpoints = mutableSetOf<Pair<String, Int>>()
+        val failedLogs = mutableListOf<String>()
+        var successResult: AdbConnectionState.Connected? = null
 
-        connect(
-            host = service.ipAddress!!,
-            port = service.port,
-            systemIdentity = systemIdentity,
-            timeoutMs = connectTimeoutMs
-        ).getOrThrow()
+        try {
+            withTimeoutOrNull(mdnsTimeoutMs) {
+                mdnsManager.discoverServices(AdbMdnsType.CONNECT)
+                    .collect { service ->
+                        val ip = service.ipAddress ?: return@collect
+                        val port = service.port
+
+                        // 1. 设备名称过滤
+                        if (deviceName != null && !service.name.contains(deviceName, ignoreCase = true)) {
+                            return@collect
+                        }
+
+                        // 2. 按 (IP, Port) 防重，避免对同一端口重复尝试
+                        if (!attemptedEndpoints.add(ip to port)) {
+                            return@collect
+                        }
+
+                        // 3. 尝试建立 ADB TLS 连接
+                        val res = connect(
+                            host = ip,
+                            port = port,
+                            systemIdentity = systemIdentity,
+                            timeoutMs = connectTimeoutMs
+                        )
+
+                        if (res.isSuccess) {
+                            successResult = res.getOrThrow()
+                            throw MdnsSuccessException() // 建连成功，终止 Flow 监听
+                        } else {
+                            val errMsg = res.exceptionOrNull()?.message ?: "Connection failed"
+                            failedLogs.add("$ip:$port ($errMsg)")
+                        }
+                    }
+            }
+        } catch (_: MdnsSuccessException) {
+            // 成功时捕获异常正常退出
+        }
+
+        successResult ?: throw IllegalStateException(
+            if (attemptedEndpoints.isEmpty()) {
+                "未在 $mdnsTimeoutMs ms 内找到匹配的 mDNS 调试服务"
+            } else {
+                "尝试连接所有匹配的 mDNS 端口均失败: [${failedLogs.joinToString("; ")}]"
+            }
+        )
     }
 
     /**
