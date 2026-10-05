@@ -4,8 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * ADB Shell V2 数据包 (5 字节 Header + Payload)
- * Header: [1 byte ID][4 bytes Length (Little-Endian)]
+ * ADB Shell V2 包结构 [1 byte ID][4 bytes Length (LE)][Payload]
  */
 public data class ShellV2Packet(
     val id: Int,

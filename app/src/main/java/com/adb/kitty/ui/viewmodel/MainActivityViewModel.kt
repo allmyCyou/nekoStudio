@@ -282,9 +282,8 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     private val _adbCommands = listOf(
         AdbCommand("无线调试配对", "adb pair "),
         AdbCommand("连接无线调试", "adb connect "),
+        AdbCommand("断开无线调试", "adb disconnect "),
         AdbCommand("adbd Shell", "adb shell "),
-        AdbCommand("adb 主机模式", "adb usb-host"),
-        AdbCommand("adb 配件模式", "adb usb-accessory"),
         AdbCommand("推送文件", "adb push "),
         AdbCommand("拉取文件", "adb pull "),
         AdbCommand("安装软件", "adb install "),
