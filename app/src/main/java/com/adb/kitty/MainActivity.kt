@@ -1197,7 +1197,7 @@ class MainActivity : ComponentActivity() {
                         } else {
                             appendLog("[success] 共 ${fileList.size} 项文件/子目录:")
                             fileList.forEach { item ->
-                                appendLog("  ${item.name.ifEmpty { remotePath }} [size=${item.size}, mode=${item.mode}]")
+                                appendLog("  ${item.path.ifEmpty { remotePath }} [size=${item.size}, mode=${item.mode}]")
                             }
                         }
                     }

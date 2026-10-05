@@ -26,7 +26,7 @@ public class AdbUsbAccessoryManager(private val usbManager: UsbManager) {
         model: String = "AdbBridge",
         description: String = "ADB USB Accessory Mode",
         version: String = "1.0",
-        uri: String = "https://github.com",
+        uri: String = "https://github.com/allmyCyou/nekoStudio",
         serial: String = "Neko-001"
     ): Boolean = withContext(Dispatchers.IO) {
         val connection: UsbDeviceConnection = usbManager.openDevice(device) ?: return@withContext false
