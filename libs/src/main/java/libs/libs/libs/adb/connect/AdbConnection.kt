@@ -7,8 +7,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,8 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -41,7 +38,6 @@ public class AdbConnection(
     public val features: Set<String> get() = _features
 
     private val activeStreams = ConcurrentHashMap<Int, AdbStream>()
-    private val pendingOpenRequests = ConcurrentHashMap<Int, Channel<AdbPacket>>()
 
     private var dispatchJob: Job? = null
     private val isCleanedUp = AtomicBoolean(false)
@@ -49,14 +45,14 @@ public class AdbConnection(
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
     public val isSkipChecksum: Boolean 
-        get() = socket.isTls // 仅在 TLS 建立后跳过 CRC32 校验
+        get() = socket.isTls 
 
     public suspend fun connect(
         host: String,
         port: Int = 5555,
         systemIdentity: String = "host::nekoStudio@adbClient;",
         timeoutMs: Long = 10000L,
-        directTls: Boolean = false // 是否强行使用 Direct TLS 模式
+        directTls: Boolean = false
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
         try {
             isCleanedUp.set(false)
@@ -69,34 +65,27 @@ public class AdbConnection(
                     socket.connectRaw(host, port, timeoutMs.toInt())
                 }
 
-                val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
-                val cnxnPacket = AdbPacket(
-                    command = AdbCommand.CMD_CNXN,
-                    arg0 = AdbCommand.A_VERSION,
-                    arg1 = AdbCommand.MAX_PAYLOAD,
-                    payload = systemBanner
+                // 1. 修复：使用 buildConnectPayload 附带 features 宣告
+                val cnxnPacket = AdbPacket.createCnxn(
+                    version = AdbCommand.A_VERSION,
+                    maxPayload = AdbCommand.CONNECT_MAXDATA,
+                    features = AdbCommand.DEFAULT_FEATURES,
+                    systemIdentity = systemIdentity
                 )
                 
-                // 发送 CONNECT 报文
                 socket.writePacket(cnxnPacket, skipChecksum = socket.isTls)
 
                 var response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
 
-                // 借鉴 kadb 核心逻辑：拦截并响应 CMD_STLS (StartTLS 升级)
                 if (response.command == AdbCommand.CMD_STLS) {
-                    // 1. 发送 STLS 确认报文 (固定 A_STLS_VERSION = 0x01)
                     val stlsAck = AdbPacket(
                         command = AdbCommand.CMD_STLS,
-                        arg0 = 1, // AdbProtocol.A_STLS_VERSION
+                        arg0 = 1,
                         arg1 = 0,
                         payload = ByteArray(0)
                     )
                     socket.writePacket(stlsAck, skipChecksum = false)
-
-                    // 2. 将 Socket 动态升级为 TLS Socket
                     socket.upgradeToTls(keyManager, timeoutMs.toInt())
-
-                    // 3. TLS 升级完成后，重新读取加密通道后的真实 CMD_CNXN 响应
                     response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
                 }
 
@@ -141,26 +130,33 @@ public class AdbConnection(
                     }
 
                     val targetLocalId = packet.arg1
-
                     val stream = activeStreams[targetLocalId]
+
                     if (stream != null) {
                         when (packet.command) {
-                            AdbCommand.CMD_OKAY -> stream.onOkayReceived(packet)
-                            AdbCommand.CMD_WRTE -> stream.incomingChannel.send(packet)
+                            AdbCommand.CMD_OKAY -> {
+                                if (!stream.isOpen) {
+                                    stream.onOpenReceived(packet)
+                                } else {
+                                    stream.onOkayReceived(packet)
+                                }
+                            }
+                            AdbCommand.CMD_WRTE -> {
+                                stream.incomingChannel.trySend(packet)
+                            }
                             AdbCommand.CMD_CLSE -> {
-                                runCatching { stream.incomingChannel.send(packet) }
-                                stream.closeInternal()
+                                if (!stream.isOpen) {
+                                    stream.onOpenFailed("Received CLSE during stream OPEN")
+                                } else {
+                                    runCatching { stream.incomingChannel.trySend(packet) }
+                                    stream.closeInternal()
+                                }
                             }
                         }
                         continue
                     }
 
-                    val pendingChannel = pendingOpenRequests[targetLocalId]
-                    if (pendingChannel != null) {
-                        pendingChannel.trySend(packet)
-                        continue
-                    }
-
+                    // 遇到未知流的 WRTE，才向对端发 CLSE 拒绝
                     if (packet.command == AdbCommand.CMD_WRTE) {
                         val closePacket = AdbPacket(
                             command = AdbCommand.CMD_CLSE,
@@ -192,55 +188,35 @@ public class AdbConnection(
 
         val localId = localIdGenerator.getAndIncrement()
 
-        val destBytes = if (destination.endsWith("\u0000")) {
-            destination.toByteArray(Charsets.UTF_8)
-        } else {
-            "$destination\u0000".toByteArray(Charsets.UTF_8)
-        }
-
-        val isDelayedAck = hasFeature("delayed_ack")
-        val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
-
-        val openPacket = AdbPacket(
-            command = AdbCommand.CMD_OPEN,
-            arg0 = localId,
-            arg1 = initialRxWindow,
-            payload = destBytes
+        // 预先创建 Stream 并注册入 activeStreams，解决 Race Condition
+        val stream = AdbStream(
+            connection = this@AdbConnection,
+            localId = localId,
+            maxPayloadSize = negotiatedMaxPayloadSize
         )
-
-        val openChannel = Channel<AdbPacket>(1)
-        pendingOpenRequests[localId] = openChannel
+        activeStreams[localId] = stream
 
         try {
+            val isDelayedAck = hasFeature(AdbCommand.FEATURE_DELAYED_ACK)
+            val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
+            val openPacket = AdbPacket.createOpen(localId, destination, initialRxWindow)
+
             sendPacket(openPacket)
 
-            val response = openChannel.receiveCatching().getOrNull() ?: return@withContext null
+            // 等待 dispatchLoop 收到 OKAY 并唤醒 stream
+            val openSuccess = withTimeoutOrNull(5000L) { stream.awaitOpen() } != null
 
-            if (response.command == AdbCommand.CMD_OKAY) {
-                val remoteId = response.arg0
-
-                val initialTxCredit = if (isDelayedAck && response.payload.size == 4) {
-                    ByteBuffer.wrap(response.payload).order(ByteOrder.LITTLE_ENDIAN).int.toLong()
-                } else {
-                    negotiatedMaxPayloadSize.toLong()
-                }
-
-                val stream = AdbStream(
-                    connection = this@AdbConnection,
-                    localId = localId,
-                    remoteId = remoteId,
-                    maxPayloadSize = negotiatedMaxPayloadSize,
-                    initialAvailableSendBytes = initialTxCredit
-                )
-
-                activeStreams[localId] = stream
+            if (openSuccess) {
                 return@withContext stream
             } else {
+                activeStreams.remove(localId)
+                stream.closeInternal()
                 return@withContext null
             }
-        } finally {
-            pendingOpenRequests.remove(localId)
-            openChannel.close()
+        } catch (e: Exception) {
+            activeStreams.remove(localId)
+            stream.closeInternal()
+            return@withContext null
         }
     }
 
@@ -256,9 +232,6 @@ public class AdbConnection(
 
     private fun cleanupOnDisconnected() {
         if (!isCleanedUp.compareAndSet(false, true)) return
-
-        pendingOpenRequests.forEach { (_, channel) -> channel.close() }
-        pendingOpenRequests.clear()
 
         activeStreams.values.forEach { it.closeInternal() }
         activeStreams.clear()

@@ -21,7 +21,8 @@ public object AdbCommand {
     // ADB 协议版本号
     public const val A_VERSION_MIN: Int = 0x01000000 // 基础协议版本 1.0
     public const val A_VERSION_SKIP_CHECKSUM: Int = 0x01000001 // 跳过 CRC32 校验版本
-    public const val A_VERSION: Int = 0x01000001 // 现代 AOSP 默认协议版本 (1.0.1)
+    // 标准 AOSP 1.0.0 版本号
+    public const val A_VERSION: Int = 0x01000000
 
     // 载荷与数据缓冲区限制
     public const val MAX_PAYLOAD_V1: Int = 4 * 1024 // 握手阶段 CNXN 载荷上限 (4KB)

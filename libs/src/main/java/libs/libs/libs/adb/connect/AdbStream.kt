@@ -2,6 +2,7 @@ package libs.libs.libs.adb.connect
 
 import libs.libs.libs.adb.public.AdbCommand
 import libs.libs.libs.adb.public.AdbPacket
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.sync.Mutex
@@ -14,25 +15,43 @@ import java.util.concurrent.atomic.AtomicLong
 public class AdbStream(
     private val connection: AdbConnection,
     public val localId: Int,
-    public val remoteId: Int,
-    private val maxPayloadSize: Int = AdbCommand.MAX_PAYLOAD,
-    initialAvailableSendBytes: Long = maxPayloadSize.toLong()
+    private val maxPayloadSize: Int = AdbCommand.MAX_PAYLOAD
 ) {
+    public var remoteId: Int = 0
+        private set
+
+    private val openDeferred = CompletableDeferred<Int>()
+    public val isOpen: Boolean get() = openDeferred.isCompleted && !openDeferred.isCancelled
+
     private val isClosed = AtomicBoolean(false)
     private val delayedAckEnabled: Boolean = connection.hasFeature(AdbCommand.FEATURE_DELAYED_ACK)
 
     private val streamWriteMutex = Mutex()
     private val streamReadMutex = Mutex()
 
-    private val availableSendBytes = AtomicLong(
-        if (delayedAckEnabled) initialAvailableSendBytes else 0L
-    )
+    private val availableSendBytes = AtomicLong(maxPayloadSize.toLong())
 
     internal val incomingChannel = Channel<AdbPacket>(Channel.UNLIMITED)
     internal val ackQuotaChannel = Channel<Int>(Channel.UNLIMITED)
 
     private var currentWritePacket: AdbPacket? = null
     private var packetReadOffset = 0
+
+    internal fun onOpenReceived(packet: AdbPacket) {
+        this.remoteId = packet.arg0
+        if (delayedAckEnabled && packet.payload.size == 4) {
+            val initialTxCredit = java.nio.ByteBuffer.wrap(packet.payload)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN).int.toLong()
+            availableSendBytes.set(initialTxCredit)
+        }
+        openDeferred.complete(packet.arg0)
+    }
+
+    internal fun onOpenFailed(reason: String) {
+        openDeferred.completeExceptionally(IOException(reason))
+    }
+
+    public suspend fun awaitOpen(): Int = openDeferred.await()
 
     internal fun onOkayReceived(packet: AdbPacket) {
         val grantedBytes = if (delayedAckEnabled && packet.payload.size == 4) {
@@ -81,47 +100,6 @@ public class AdbStream(
             }
 
             return@withLock data
-        }
-    }
-
-    public suspend fun read(sink: ByteArray, offset: Int = 0, byteCount: Int = sink.size): Int = withContext(Dispatchers.IO) {
-        if (isClosed.get()) return@withContext -1
-
-        streamReadMutex.withLock {
-            if (isClosed.get()) return@withLock -1
-
-            var packet = currentWritePacket
-            if (packet == null) {
-                val nextPacket = incomingChannel.receiveCatching().getOrNull() ?: return@withLock -1
-                if (nextPacket.command == AdbCommand.CMD_CLSE) {
-                    closeInternal()
-                    return@withLock -1
-                }
-                packet = nextPacket
-                currentWritePacket = packet
-                packetReadOffset = 0
-
-                if (!delayedAckEnabled) {
-                    connection.sendPacket(AdbPacket.createOkay(localId, remoteId))
-                }
-            }
-
-            val remainingInPacket = packet.payload.size - packetReadOffset
-            val bytesToRead = minOf(byteCount, remainingInPacket)
-
-            System.arraycopy(packet.payload, packetReadOffset, sink, offset, bytesToRead)
-            packetReadOffset += bytesToRead
-
-            if (packetReadOffset >= packet.payload.size) {
-                currentWritePacket = null
-                packetReadOffset = 0
-            }
-
-            if (delayedAckEnabled) {
-                sendAckForBytes(bytesToRead)
-            }
-
-            return@withLock bytesToRead
         }
     }
 
@@ -190,6 +168,7 @@ public class AdbStream(
 
     internal fun closeInternal() {
         if (isClosed.compareAndSet(false, true)) {
+            openDeferred.cancel()
             performCleanup()
         }
     }
