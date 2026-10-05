@@ -81,14 +81,14 @@ public class AdbConnection(
 
                 var response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
 
-                // 3. 拦截 CMD_STLS (Android 11+ TLS 动态升级)
+                // 3. 拦截 CMD_STLS (Android 11+ StartTLS 升级)
                 if (response.command == AdbCommand.CMD_STLS) {
                     val stlsAck = AdbPacket.createStls(AdbCommand.A_STLS_VERSION)
                     socket.writePacket(stlsAck, skipChecksum = false)
 
                     socket.upgradeToTls(keyManager, timeoutMs.toInt())
 
-                    // TLS 升级成功后，重新发送 CNXN 或直接读取通道响应
+                    // TLS 升级完成，重新发送加密通道后的 CNXN 握手
                     socket.writePacket(cnxnPacket, skipChecksum = true)
                     response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = true)
                 }
@@ -96,10 +96,10 @@ public class AdbConnection(
                 // 4. 拦截 CMD_AUTH 挑战 (传统/非 TLS RSA 签名鉴权)
                 if (response.command == AdbCommand.CMD_AUTH) {
                     _state.value = AdbConnectionState.Authenticating
-                    response = handleRsaAuthentication(response, systemIdentity)
+                    response = handleRsaAuthentication(response)
                 }
 
-                // 5. 校验最终握手结果是否为 CMD_CNXN
+                // 5. 校验最终握手响应
                 if (response.command != AdbCommand.CMD_CNXN) {
                     throw IllegalStateException("Unexpected packet during handshake: 0x${Integer.toHexString(response.command)}")
                 }
@@ -130,31 +130,28 @@ public class AdbConnection(
     }
 
     /**
-     * 处理 CMD_AUTH Challenge/Response 过程（签名 -> 公钥发送 -> 等待设备端确认）
+     * 处理 CMD_AUTH Challenge/Response 鉴权流程
      */
-    private suspend fun handleRsaAuthentication(
-        initialAuthPacket: AdbPacket,
-        systemIdentity: String
-    ): AdbPacket {
+    private suspend fun handleRsaAuthentication(initialAuthPacket: AdbPacket): AdbPacket {
         var currentPacket = initialAuthPacket
 
         while (currentPacket.command == AdbCommand.CMD_AUTH) {
             if (currentPacket.arg0 == AdbCommand.AUTH_TOKEN) {
-                // 1. 使用本地 RSA 私钥对 Token 签名并发送
+                // 1. 使用 AdbKeyManager.signToken 对对端 Token 签名
                 val token = currentPacket.payload
-                val signature = keyManager.sign(token)
+                val signature = keyManager.signToken(token)
                 val authSigPacket = AdbPacket.createAuth(AdbCommand.AUTH_SIGNATURE, signature)
                 socket.writePacket(authSigPacket, skipChecksum = socket.isTls)
 
                 currentPacket = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
 
-                // 2. 如果签名被拒绝（对端无此公钥），发送 RSA 公钥请求在设备上弹出“允许 USB 调试”确认框
+                // 2. 签名验证失败时，使用 AdbKeyManager.getAdbPublicKeyBytes 发送 RSA 公钥以触发设备弹窗授权
                 if (currentPacket.command == AdbCommand.CMD_AUTH && currentPacket.arg0 == AdbCommand.AUTH_TOKEN) {
-                    val pubKeyBytes = keyManager.getPublicKeyBytes()
+                    val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
                     val authPubKeyPacket = AdbPacket.createAuth(AdbCommand.AUTH_RSAPUBLICKEY, pubKeyBytes)
                     socket.writePacket(authPubKeyPacket, skipChecksum = socket.isTls)
 
-                    // 此时设备端会弹出确认框，阻塞等待用户在手机上点击确认
+                    // 阻塞等待用户在设备弹窗点击授权确认
                     currentPacket = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
                 }
             } else {
@@ -196,7 +193,6 @@ public class AdbConnection(
                         continue
                     }
 
-                    // 收到对未知/已失效流的 WRTE，及时给对端回复 CLSE
                     if (packet.command == AdbCommand.CMD_WRTE) {
                         val closePacket = AdbPacket.createClose(localId = packet.arg1, remoteId = packet.arg0)
                         runCatching { sendPacket(closePacket) }
