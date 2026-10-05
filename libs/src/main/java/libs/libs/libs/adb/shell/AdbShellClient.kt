@@ -32,7 +32,8 @@ public class AdbShellClient(
     public suspend fun execV1(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         val sentinel = "__ADB_EXIT_CODE_${System.currentTimeMillis()}__:"
-        val wrappedCommand = "($command); printf \"\\n$sentinel\%\%d\" $?"
+        // 修复转义：\n 表示换行，%d 直接写入，\$? 正确转义 Shell 变量 $? 避免 Kotlin 模板符号冲突
+        val wrappedCommand = "($command); printf \"\n$sentinel%d\" \$?"
 
         val stream = connection.openStream("exec:$wrappedCommand")
             ?: return@withContext ShellCommandResult(
