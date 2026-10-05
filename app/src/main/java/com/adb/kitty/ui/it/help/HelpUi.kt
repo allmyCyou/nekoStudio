@@ -42,12 +42,16 @@ fun CommandHelpBottomSheet(
                 description = "使用有线/无线连接到adbd",
                 options = listOf(
                     CommandOption(
-                        flag = "adb pair IP地址:配对端口 配对码",
-                        description = "adb pair 198.0.0.1:13056 123456"
+                        flag = "adb pair IP地址 配对端口 配对码",
+                        description = "adb pair 198.0.0.1 13056 123456"
                     ),
                     CommandOption(
                         flag = "adb connect IP地址 无线调试端口",
                         description = "adb connect 198.0.0.1 13056"
+                    ),
+                    CommandOption(
+                        flag = "adb disconnect",
+                        description = "断开无线调试连接"
                     ),
                     CommandOption(
                         flag = "adb push",
@@ -80,14 +84,6 @@ fun CommandHelpBottomSheet(
                     CommandOption(
                         flag = "adb reboot",
                         description = "重启设备"
-                    ),
-                    CommandOption(
-                        flag = "adb usb-host",
-                        description = "建立 USB 主机通信"
-                    ),
-                    CommandOption(
-                        flag = "adb usb-accessory",
-                        description = "建立 USB 配件通信"
                     )
                 )
             ),
@@ -98,35 +94,39 @@ fun CommandHelpBottomSheet(
                 options = listOf(
                     CommandOption(
                         flag = "reboot 可选参数",
-                        description = "使用 reboot 进行重启操作"
+                        description = "重启"
                     ),
                     CommandOption(
                         flag = "getvar 参数",
-                        description = "使用 getvar 进行查询操作"
+                        description = "查询参数"
                     ),
                     CommandOption(
                         flag = "oem 参数",
-                        description = "使用 oem 进行解锁、回锁或查询操作"
+                        description = "解锁、回锁或查询操作"
                     ),
                     CommandOption(
                         flag = "erase 分区",
-                        description = "使用 erase 进行擦除数据操作"
+                        description = "擦除分区数据"
                     ),
                     CommandOption(
                         flag = "format 分区",
-                        description = "使用 format 进行格式化操作"
+                        description = "格式化分区"
                     ),
                     CommandOption(
                         flag = "set_active a或b",
-                        description = "使用 set_active 进行切换活跃插槽操作"
+                        description = "切换活跃插槽"
                     ),
                     CommandOption(
                         flag = "flash 分区 路径",
-                        description = "使用 flash 进行线刷操作"
+                        description = "刷写分区"
                     ),
                     CommandOption(
                         flag = "boot 文件名",
-                        description = "使用 boot 进行临时引导数据操作"
+                        description = "临时引导数据"
+                    ),
+                    CommandOption(
+                        flag = "--fb fastboot.bash",
+                        description = "批量执行 fastboot 指令"
                     )
                 )
             ),

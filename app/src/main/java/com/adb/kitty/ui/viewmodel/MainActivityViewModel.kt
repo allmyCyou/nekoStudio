@@ -291,8 +291,6 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         AdbCommand("登录超级用户", "adb root"),
         AdbCommand("退出超级用户", "adb unroot"),
         AdbCommand("设备重启", "adb reboot "),
-        AdbCommand("挂载文件系统", "adb remount "),
-        AdbCommand("abb 特征", "adb abb "),
         AdbCommand("查看应用自身域", "id"),
         AdbCommand("查看SeLinux状态", "getenforce"),
         AdbCommand("系统重启，相当于长按电源键", "svc power reboot"),

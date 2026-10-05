@@ -8,8 +8,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.IOException
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -21,8 +19,10 @@ public class AdbStream(
     initialAvailableSendBytes: Long = maxPayloadSize.toLong()
 ) {
     private val isClosed = AtomicBoolean(false)
-    private val delayedAckEnabled: Boolean = connection.hasFeature("delayed_ack")
+    private val delayedAckEnabled: Boolean = connection.hasFeature(AdbCommand.FEATURE_DELAYED_ACK)
+
     private val streamWriteMutex = Mutex()
+    private val streamReadMutex = Mutex()
 
     private val availableSendBytes = AtomicLong(
         if (delayedAckEnabled) initialAvailableSendBytes else 0L
@@ -36,7 +36,9 @@ public class AdbStream(
 
     internal fun onOkayReceived(packet: AdbPacket) {
         val grantedBytes = if (delayedAckEnabled && packet.payload.size == 4) {
-            ByteBuffer.wrap(packet.payload).order(ByteOrder.LITTLE_ENDIAN).int
+            java.nio.ByteBuffer.wrap(packet.payload)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .int
         } else {
             0
         }
@@ -45,91 +47,91 @@ public class AdbStream(
 
     public suspend fun read(): ByteArray? = readNextChunk()
 
-    /**
-     * 读取下一个数据块
-     */
     public suspend fun readNextChunk(): ByteArray? = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext null
 
-        val current = currentWritePacket
-        if (current != null) {
-            val remaining = current.payload.size - packetReadOffset
-            val chunk = current.payload.copyOfRange(packetReadOffset, current.payload.size)
-            currentWritePacket = null
-            packetReadOffset = 0
-            
-            if (delayedAckEnabled) {
-                sendAckForBytes(remaining)
+        streamReadMutex.withLock {
+            if (isClosed.get()) return@withLock null
+
+            val current = currentWritePacket
+            if (current != null) {
+                val remaining = current.payload.size - packetReadOffset
+                val chunk = current.payload.copyOfRange(packetReadOffset, current.payload.size)
+                currentWritePacket = null
+                packetReadOffset = 0
+
+                if (delayedAckEnabled) {
+                    sendAckForBytes(remaining)
+                }
+                return@withLock chunk
             }
-            return@withContext chunk
+
+            val packet = incomingChannel.receiveCatching().getOrNull() ?: return@withLock null
+            if (packet.command == AdbCommand.CMD_CLSE) {
+                closeInternal()
+                return@withLock null
+            }
+
+            val data = packet.payload
+
+            if (delayedAckEnabled) {
+                sendAckForBytes(data.size)
+            } else {
+                connection.sendPacket(AdbPacket.createOkay(localId, remoteId))
+            }
+
+            return@withLock data
         }
-
-        val packet = incomingChannel.receiveCatching().getOrNull() ?: return@withContext null
-        if (packet.command == AdbCommand.CMD_CLSE) {
-            closeInternal()
-            return@withContext null
-        }
-
-        val data = packet.payload
-
-        // 关键修复：根据模式进行 ACK 响应，防止非 delayed_ack 模式挂起对端
-        if (delayedAckEnabled) {
-            sendAckForBytes(data.size)
-        } else {
-            val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId)
-            connection.sendPacket(okayPacket)
-        }
-
-        return@withContext data
     }
 
     public suspend fun read(sink: ByteArray, offset: Int = 0, byteCount: Int = sink.size): Int = withContext(Dispatchers.IO) {
         if (isClosed.get()) return@withContext -1
 
-        var packet = currentWritePacket
-        if (packet == null) {
-            val nextPacket = incomingChannel.receiveCatching().getOrNull() ?: return@withContext -1
-            if (nextPacket.command == AdbCommand.CMD_CLSE) {
-                closeInternal()
-                return@withContext -1
+        streamReadMutex.withLock {
+            if (isClosed.get()) return@withLock -1
+
+            var packet = currentWritePacket
+            if (packet == null) {
+                val nextPacket = incomingChannel.receiveCatching().getOrNull() ?: return@withLock -1
+                if (nextPacket.command == AdbCommand.CMD_CLSE) {
+                    closeInternal()
+                    return@withLock -1
+                }
+                packet = nextPacket
+                currentWritePacket = packet
+                packetReadOffset = 0
+
+                if (!delayedAckEnabled) {
+                    connection.sendPacket(AdbPacket.createOkay(localId, remoteId))
+                }
             }
-            packet = nextPacket
-            currentWritePacket = packet
-            packetReadOffset = 0
 
-            if (!delayedAckEnabled) {
-                val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId)
-                connection.sendPacket(okayPacket)
+            val remainingInPacket = packet.payload.size - packetReadOffset
+            val bytesToRead = minOf(byteCount, remainingInPacket)
+
+            System.arraycopy(packet.payload, packetReadOffset, sink, offset, bytesToRead)
+            packetReadOffset += bytesToRead
+
+            if (packetReadOffset >= packet.payload.size) {
+                currentWritePacket = null
+                packetReadOffset = 0
             }
+
+            if (delayedAckEnabled) {
+                sendAckForBytes(bytesToRead)
+            }
+
+            return@withLock bytesToRead
         }
-
-        val remainingInPacket = packet.payload.size - packetReadOffset
-        val bytesToRead = minOf(byteCount, remainingInPacket)
-
-        System.arraycopy(packet.payload, packetReadOffset, sink, offset, bytesToRead)
-        packetReadOffset += bytesToRead
-
-        if (packetReadOffset >= packet.payload.size) {
-            currentWritePacket = null
-            packetReadOffset = 0
-        }
-
-        if (delayedAckEnabled) {
-            sendAckForBytes(bytesToRead)
-        }
-
-        return@withContext bytesToRead
     }
 
     private suspend fun sendAckForBytes(byteCount: Int) {
-        if (delayedAckEnabled) {
-            val ackPayload = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(byteCount).array()
-            val okayPacket = AdbPacket(AdbCommand.CMD_OKAY, localId, remoteId, ackPayload)
-            connection.sendPacket(okayPacket)
+        if (delayedAckEnabled && byteCount > 0) {
+            connection.sendPacket(AdbPacket.createOkay(localId, remoteId, ackBytes = byteCount))
         }
     }
 
-    public suspend fun write(data: ByteArray, offset: Int = 0, length: Int = data.size) = withContext(Dispatchers.IO) {
+    public suspend fun write(data: ByteArray, offset: Int = 0, length: Int = data.size): Unit = withContext(Dispatchers.IO) {
         if (isClosed.get()) throw IOException("AdbStream $localId is closed")
 
         streamWriteMutex.withLock {
@@ -137,13 +139,14 @@ public class AdbStream(
             var currentOffset = offset
 
             while (remaining > 0) {
+                if (isClosed.get()) throw IOException("AdbStream $localId was closed during write")
+
                 if (delayedAckEnabled) {
                     while (availableSendBytes.get() <= 0) {
                         val grantedCredit = ackQuotaChannel.receiveCatching().getOrNull()
                             ?: throw IOException("Stream $localId closed while waiting for delayed ACK")
                         availableSendBytes.addAndGet(grantedCredit.toLong())
                     }
-                    // 批量清空当前 channel 积压的配额，防止发送窗口恢复滞后
                     while (true) {
                         val extraCredit = ackQuotaChannel.tryReceive().getOrNull() ?: break
                         availableSendBytes.addAndGet(extraCredit.toLong())
@@ -159,8 +162,7 @@ public class AdbStream(
                     data.copyOfRange(currentOffset, currentOffset + chunkSize)
                 }
 
-                val writePacket = AdbPacket(AdbCommand.CMD_WRTE, localId, remoteId, payload)
-                connection.sendPacket(writePacket)
+                connection.sendPacket(AdbPacket.createWrite(localId, remoteId, payload))
 
                 if (delayedAckEnabled) {
                     availableSendBytes.addAndGet(-chunkSize.toLong())
@@ -177,13 +179,12 @@ public class AdbStream(
         }
     }
 
-    public suspend fun close() = withContext(Dispatchers.IO) {
+    public suspend fun close(): Unit = withContext(Dispatchers.IO) {
         if (!isClosed.compareAndSet(false, true)) return@withContext
         performCleanup()
 
-        val closePacket = AdbPacket(AdbCommand.CMD_CLSE, localId, remoteId)
         try {
-            connection.sendPacket(closePacket)
+            connection.sendPacket(AdbPacket.createClose(localId, remoteId))
         } catch (_: Exception) {}
     }
 

@@ -7,7 +7,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
@@ -49,57 +49,57 @@ public class AdbConnection(
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
     public val isSkipChecksum: Boolean 
-        get() = socket.isTls // 仅在 TLS 建立后跳过 CRC32 校验
+        get() = socket.isTls || negotiatedVersion >= AdbCommand.A_VERSION_SKIP_CHECKSUM
 
     public suspend fun connect(
         host: String,
         port: Int = 5555,
         systemIdentity: String = "host::nekoStudio@adbClient;",
         timeoutMs: Long = 10000L,
-        directTls: Boolean = false // 是否强行使用 Direct TLS 模式
+        directTls: Boolean = false
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
         try {
             isCleanedUp.set(false)
             _state.value = AdbConnectionState.Connecting
 
             val connectedState: AdbConnectionState.Connected = withTimeout(timeoutMs) {
+                // 1. 建立基础 Socket 或 Direct TLS 连接
                 if (directTls) {
                     socket.connectTls(host, port, keyManager, timeoutMs.toInt())
                 } else {
                     socket.connectRaw(host, port, timeoutMs.toInt())
                 }
 
-                val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
-                val cnxnPacket = AdbPacket(
-                    command = AdbCommand.CMD_CNXN,
-                    arg0 = AdbCommand.A_VERSION,
-                    arg1 = AdbCommand.MAX_PAYLOAD,
-                    payload = systemBanner
+                // 2. 发送第一个 CNXN 握手报文
+                val cnxnPacket = AdbPacket.createCnxn(
+                    version = AdbCommand.A_VERSION,
+                    maxPayload = AdbCommand.CONNECT_MAXDATA,
+                    features = AdbCommand.DEFAULT_FEATURES,
+                    systemIdentity = systemIdentity
                 )
-                
-                // 发送 CONNECT 报文
                 socket.writePacket(cnxnPacket, skipChecksum = socket.isTls)
 
-                var response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
+                var response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
 
-                // 借鉴 kadb 核心逻辑：拦截并响应 CMD_STLS (StartTLS 升级)
+                // 3. 拦截 CMD_STLS (Android 11+ TLS 动态升级)
                 if (response.command == AdbCommand.CMD_STLS) {
-                    // 1. 发送 STLS 确认报文 (固定 A_STLS_VERSION = 0x01)
-                    val stlsAck = AdbPacket(
-                        command = AdbCommand.CMD_STLS,
-                        arg0 = 1, // AdbProtocol.A_STLS_VERSION
-                        arg1 = 0,
-                        payload = ByteArray(0)
-                    )
+                    val stlsAck = AdbPacket.createStls(AdbCommand.A_STLS_VERSION)
                     socket.writePacket(stlsAck, skipChecksum = false)
 
-                    // 2. 将 Socket 动态升级为 TLS Socket
                     socket.upgradeToTls(keyManager, timeoutMs.toInt())
 
-                    // 3. TLS 升级完成后，重新读取加密通道后的真实 CMD_CNXN 响应
-                    response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
+                    // TLS 升级成功后，重新发送 CNXN 或直接读取通道响应
+                    socket.writePacket(cnxnPacket, skipChecksum = true)
+                    response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = true)
                 }
 
+                // 4. 拦截 CMD_AUTH 挑战 (传统/非 TLS RSA 签名鉴权)
+                if (response.command == AdbCommand.CMD_AUTH) {
+                    _state.value = AdbConnectionState.Authenticating
+                    response = handleRsaAuthentication(response, systemIdentity)
+                }
+
+                // 5. 校验最终握手结果是否为 CMD_CNXN
                 if (response.command != AdbCommand.CMD_CNXN) {
                     throw IllegalStateException("Unexpected packet during handshake: 0x${Integer.toHexString(response.command)}")
                 }
@@ -112,7 +112,7 @@ public class AdbConnection(
 
                 val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
                 _features = parseFeatures(banner)
-                
+
                 val state = AdbConnectionState.Connected(banner)
                 _state.value = state
                 state
@@ -129,14 +129,49 @@ public class AdbConnection(
         }
     }
 
+    /**
+     * 处理 CMD_AUTH Challenge/Response 过程（签名 -> 公钥发送 -> 等待设备端确认）
+     */
+    private suspend fun handleRsaAuthentication(
+        initialAuthPacket: AdbPacket,
+        systemIdentity: String
+    ): AdbPacket {
+        var currentPacket = initialAuthPacket
+
+        while (currentPacket.command == AdbCommand.CMD_AUTH) {
+            if (currentPacket.arg0 == AdbCommand.AUTH_TOKEN) {
+                // 1. 使用本地 RSA 私钥对 Token 签名并发送
+                val token = currentPacket.payload
+                val signature = keyManager.sign(token)
+                val authSigPacket = AdbPacket.createAuth(AdbCommand.AUTH_SIGNATURE, signature)
+                socket.writePacket(authSigPacket, skipChecksum = socket.isTls)
+
+                currentPacket = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
+
+                // 2. 如果签名被拒绝（对端无此公钥），发送 RSA 公钥请求在设备上弹出“允许 USB 调试”确认框
+                if (currentPacket.command == AdbCommand.CMD_AUTH && currentPacket.arg0 == AdbCommand.AUTH_TOKEN) {
+                    val pubKeyBytes = keyManager.getPublicKeyBytes()
+                    val authPubKeyPacket = AdbPacket.createAuth(AdbCommand.AUTH_RSAPUBLICKEY, pubKeyBytes)
+                    socket.writePacket(authPubKeyPacket, skipChecksum = socket.isTls)
+
+                    // 此时设备端会弹出确认框，阻塞等待用户在手机上点击确认
+                    currentPacket = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
+                }
+            } else {
+                throw IllegalStateException("Unsupported AUTH type: ${currentPacket.arg0}")
+            }
+        }
+        return currentPacket
+    }
+
     private fun startDispatchLoop() {
         dispatchJob?.cancel()
         dispatchJob = connectionScope.launch {
             try {
                 while (socket.isConnected) {
                     val packet = try {
-                        socket.readPacket(negotiatedMaxPayloadSize)
-                    } catch (e: Exception) {
+                        socket.readPacket(negotiatedMaxPayloadSize, skipChecksum = isSkipChecksum)
+                    } catch (_: Exception) {
                         break
                     }
 
@@ -161,13 +196,9 @@ public class AdbConnection(
                         continue
                     }
 
+                    // 收到对未知/已失效流的 WRTE，及时给对端回复 CLSE
                     if (packet.command == AdbCommand.CMD_WRTE) {
-                        val closePacket = AdbPacket(
-                            command = AdbCommand.CMD_CLSE,
-                            arg0 = packet.arg1,
-                            arg1 = packet.arg0,
-                            payload = ByteArray(0)
-                        )
+                        val closePacket = AdbPacket.createClose(localId = packet.arg1, remoteId = packet.arg0)
                         runCatching { sendPacket(closePacket) }
                     }
                 }
@@ -178,7 +209,6 @@ public class AdbConnection(
     }
 
     private fun parseFeatures(banner: String): Set<String> {
-        // 1. 清理 C 风格空字符 '\0'、换行符及前后空格
         val cleanBanner = banner.trim { it <= ' ' || it == '\u0000' }
 
         val featuresSegment = cleanBanner.split(';')
@@ -196,21 +226,13 @@ public class AdbConnection(
         check(state.value is AdbConnectionState.Connected) { "ADB Connection is not active" }
 
         val localId = localIdGenerator.getAndIncrement()
-
-        val destBytes = if (destination.endsWith("\u0000")) {
-            destination.toByteArray(Charsets.UTF_8)
-        } else {
-            "$destination\u0000".toByteArray(Charsets.UTF_8)
-        }
-
-        val isDelayedAck = hasFeature("delayed_ack")
+        val isDelayedAck = hasFeature(AdbCommand.FEATURE_DELAYED_ACK)
         val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
 
-        val openPacket = AdbPacket(
-            command = AdbCommand.CMD_OPEN,
-            arg0 = localId,
-            arg1 = initialRxWindow,
-            payload = destBytes
+        val openPacket = AdbPacket.createOpen(
+            localId = localId,
+            destination = destination,
+            initialRxWindow = initialRxWindow
         )
 
         val openChannel = Channel<AdbPacket>(1)
@@ -253,7 +275,7 @@ public class AdbConnection(
         activeStreams.remove(localId)
     }
 
-    public suspend fun sendPacket(packet: AdbPacket) = withContext(Dispatchers.IO) {
+    public suspend fun sendPacket(packet: AdbPacket): Unit = withContext(Dispatchers.IO) {
         writeMutex.withLock {
             socket.writePacket(packet, skipChecksum = isSkipChecksum)
         }

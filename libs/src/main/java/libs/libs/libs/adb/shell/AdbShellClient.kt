@@ -1,39 +1,44 @@
 package libs.libs.libs.adb.shell
 
 import libs.libs.libs.adb.connect.AdbConnection
+import libs.libs.libs.adb.connect.AdbStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.ExperimentalSerializationApi
-import kotlinx.serialization.decodeFromByteArray
-import kotlinx.serialization.encodeToByteArray
-import kotlinx.serialization.protobuf.ProtoBuf
 import java.io.ByteArrayOutputStream
 
-@OptIn(ExperimentalSerializationApi::class)
 public class AdbShellClient(
-    @PublishedApi internal val connection: AdbConnection,
-    @PublishedApi internal val protoBuf: ProtoBuf = ProtoBuf
+    @PublishedApi internal val connection: AdbConnection
 ) {
     public val supportsShellV2: Boolean get() = connection.hasFeature("shell_v2")
 
     /**
-     * 执行 Shell 指令（优先尝试 Shell V2，降级使用 V1）
+     * 执行 Shell 指令（优先尝试 Shell V2，失败自动降级使用 V1）
      */
     public suspend fun exec(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
-        if (supportsShellV2) execV2(command) else execV1(command)
+        if (supportsShellV2) {
+            val v2Result = execV2(command)
+            // 当 V2 建流失败时，自动降级至 V1 重新尝试
+            if (v2Result.exitCode == -1 && v2Result.stderr.contains("Failed to open shell_v2 stream")) {
+                return@withContext execV1(command)
+            }
+            v2Result
+        } else {
+            execV1(command)
+        }
     }
 
     /**
-     * 强行以 Exec (V1) 模式发送命令
+     * 以 Exec (V1) 模式发送命令
      */
     public suspend fun execV1(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        val sentinel = "__ADB_EXIT_CODE_${System.currentTimeMillis()}__:"
-        // 修复转义：\n 表示换行，%d 直接写入，\$? 正确转义 Shell 变量 $? 避免 Kotlin 模板符号冲突
-        val wrappedCommand = "($command); printf \"\n$sentinel%d\" \$?"
+        val sentinel = "__ADB_EXIT_CODE_${startTime}__:"
+        // 1. \n 被转义为真正的 \n，由远端 printf 解析为换行
+        // 2. ${'$'}? 确保运行时导出纯粹的 $? 由远端 Shell 解释 exit code
+        val wrappedCommand = "($command); printf \"\n$sentinel\%d\" \${'$'}?"
 
         val stream = connection.openStream("exec:$wrappedCommand")
             ?: return@withContext ShellCommandResult(
@@ -73,8 +78,6 @@ public class AdbShellClient(
      * 以 Shell V2 模式发送命令 (`shell,v2,raw:`)
      */
     public suspend fun execV2(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
-        if (!supportsShellV2) return@withContext execV1(command)
-
         val startTime = System.currentTimeMillis()
         val stream = connection.openStream("shell,v2,raw:$command")
             ?: return@withContext ShellCommandResult(
@@ -84,23 +87,15 @@ public class AdbShellClient(
         val stdoutStream = ByteArrayOutputStream()
         val stderrStream = ByteArrayOutputStream()
         var exitCode = -1
-        val v2Buffer = ShellV2Buffer()
 
         try {
-            while (true) {
-                val data = stream.read() ?: break
-                if (data.isNotEmpty()) {
-                    v2Buffer.append(data)
-                    while (true) {
-                        val packet = v2Buffer.pollPacket() ?: break
-                        when (packet.id) {
-                            ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
-                            ShellV2Packet.ID_STDERR -> stderrStream.write(packet.payload)
-                            ShellV2Packet.ID_EXIT -> {
-                                if (packet.payload.isNotEmpty()) {
-                                    exitCode = packet.payload[0].toInt() and 0xFF
-                                }
-                            }
+            readShellV2Stream(stream) { packet ->
+                when (packet.id) {
+                    ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
+                    ShellV2Packet.ID_STDERR -> stderrStream.write(packet.payload)
+                    ShellV2Packet.ID_EXIT -> {
+                        if (packet.payload.isNotEmpty()) {
+                            exitCode = packet.payload[0].toUByte().toInt()
                         }
                     }
                 }
@@ -118,7 +113,7 @@ public class AdbShellClient(
     }
 
     /**
-     * 读取无损 STDOUT 二进制字节数组（适合截屏、二进制文件 Dump）
+     * 读取无损 STDOUT 二进制字节数组（适用于二进制 Dump、截图等）
      */
     public suspend fun execV2RawBytes(command: String): ByteArray = withContext(Dispatchers.IO) {
         val stream = connection.openStream("shell,v2,raw:$command")
@@ -126,22 +121,14 @@ public class AdbShellClient(
 
         val stdoutStream = ByteArrayOutputStream()
         var exitCode = -1
-        val v2Buffer = ShellV2Buffer()
 
         try {
-            while (true) {
-                val data = stream.read() ?: break
-                if (data.isNotEmpty()) {
-                    v2Buffer.append(data)
-                    while (true) {
-                        val packet = v2Buffer.pollPacket() ?: break
-                        when (packet.id) {
-                            ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
-                            ShellV2Packet.ID_EXIT -> {
-                                if (packet.payload.isNotEmpty()) {
-                                    exitCode = packet.payload[0].toInt() and 0xFF
-                                }
-                            }
+            readShellV2Stream(stream) { packet ->
+                when (packet.id) {
+                    ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
+                    ShellV2Packet.ID_EXIT -> {
+                        if (packet.payload.isNotEmpty()) {
+                            exitCode = packet.payload[0].toUByte().toInt()
                         }
                     }
                 }
@@ -155,40 +142,58 @@ public class AdbShellClient(
     }
 
     /**
-     * 流式响应传输
+     * 智能流式响应传输 (优先 Shell V2，失败无缝回退 V1)
      */
     public fun execStream(command: String): Flow<ShellStreamChunk> = flow {
         if (supportsShellV2) {
-            val stream = connection.openStream("shell,v2,raw:$command") ?: return@flow
-            val v2Buffer = ShellV2Buffer()
-            try {
-                while (true) {
-                    val data = stream.read() ?: break
-                    if (data.isNotEmpty()) {
-                        v2Buffer.append(data)
-                        while (true) {
-                            val packet = v2Buffer.pollPacket() ?: break
-                            when (packet.id) {
-                                ShellV2Packet.ID_STDOUT -> emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
-                                ShellV2Packet.ID_STDERR -> emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
-                                ShellV2Packet.ID_EXIT -> return@flow
-                            }
+            val stream = connection.openStream("shell,v2,raw:$command")
+            if (stream != null) {
+                try {
+                    readShellV2Stream(stream) { packet ->
+                        when (packet.id) {
+                            ShellV2Packet.ID_STDOUT -> emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
+                            ShellV2Packet.ID_STDERR -> emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
                         }
                     }
+                } finally {
+                    stream.close()
                 }
-            } finally {
-                stream.close()
-            }
-        } else {
-            val stream = connection.openStream("exec:$command") ?: return@flow
-            try {
-                while (true) {
-                    val data = stream.read() ?: break
-                    if (data.isNotEmpty()) emit(ShellStreamChunk(ShellStreamType.STDOUT, data))
-                }
-            } finally {
-                stream.close()
+                return@flow
             }
         }
+
+        // 降级使用 Exec V1 模式
+        val stream = connection.openStream("exec:$command") ?: return@flow
+        try {
+            while (true) {
+                val data = stream.read() ?: break
+                if (data.isNotEmpty()) {
+                    emit(ShellStreamChunk(ShellStreamType.STDOUT, data))
+                }
+            }
+        } finally {
+            stream.close()
+        }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * 通用 Shell V2 数据流读取与轮询辅助函数
+     */
+    private suspend inline fun readShellV2Stream(
+        stream: AdbStream,
+        crossinline onPacket: suspend (ShellV2Packet) -> Unit
+    ) {
+        val buffer = ShellV2Buffer()
+        while (true) {
+            val data = stream.read() ?: break
+            if (data.isNotEmpty()) {
+                buffer.append(data)
+                while (true) {
+                    val packet = buffer.pollPacket() ?: break
+                    onPacket(packet)
+                    if (packet.id == ShellV2Packet.ID_EXIT) return
+                }
+            }
+        }
+    }
 }

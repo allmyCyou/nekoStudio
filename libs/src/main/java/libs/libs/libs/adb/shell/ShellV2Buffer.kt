@@ -4,7 +4,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * 零 GC 开销的 Shell V2 拼包解包环形缓冲区
+ * 高性能 Shell V2 拼包解包缓冲区
  */
 public class ShellV2Buffer {
     private var buffer = ByteArray(8192)
@@ -30,6 +30,11 @@ public class ShellV2Buffer {
 
         val totalSize = ShellV2Packet.HEADER_SIZE + len
         if (size < totalSize) return null
+
+        // 校验 Device -> Host 合法包 ID (仅允许 STDOUT, STDERR, EXIT)
+        require(id == ShellV2Packet.ID_STDOUT || id == ShellV2Packet.ID_STDERR || id == ShellV2Packet.ID_EXIT) {
+            "Invalid device-to-host shell packet id: $id"
+        }
 
         val payload = buffer.copyOfRange(head + ShellV2Packet.HEADER_SIZE, head + totalSize)
         head += totalSize
