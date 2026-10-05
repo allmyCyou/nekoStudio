@@ -54,10 +54,9 @@ public class AdbAbbClient(
         val startTime = System.currentTimeMillis()
         val destination = buildDestination("abb:", args)
         
-        // 核心变更：若 openStream 返回 null，说明 adbd 无法处理 abb: 服务请求
         val stream = connection.openStream(destination)
             ?: run {
-                isAbbSupportedCache = false // 标记为不支持
+                isAbbSupportedCache = false
                 return@withContext ShellCommandResult(
                     exitCode = -1,
                     stdout = "",
@@ -90,7 +89,6 @@ public class AdbAbbClient(
                     }
                 }
             }
-            // 能成功建立并完成交互，标记为支持
             if (isAbbSupportedCache == null) {
                 isAbbSupportedCache = true
             }
@@ -107,7 +105,7 @@ public class AdbAbbClient(
     }
 
     /**
-     * 安装单体 APK File
+     * 安装单体 APK File (支持自动降级)
      */
     public suspend fun installApk(
         apkFile: File,
@@ -116,7 +114,6 @@ public class AdbAbbClient(
     ): Result<Unit> {
         require(apkFile.exists()) { "APK file non-existent: ${apkFile.absolutePath}" }
 
-        // 1. 若未被标记为不支持，优先尝试 ABB 流式安装
         if (canTryAbb()) {
             val abbResult = apkFile.inputStream().use { stream ->
                 installApkAbbInternal(stream, apkFile.length(), options, onProgress)
@@ -127,17 +124,49 @@ public class AdbAbbClient(
                 return abbResult
             }
 
-            // 如果失败原因是因为 ABB 服务不受支持（流建立失败），清除/标记后静默降级
             if (isAbbSupportedCache == false) {
-                // 标记已更新为 false，自动进入下方的 Legacy 流程
+                // 自动进入 Legacy 降级流程
             } else {
-                // 若是因为 APK 解析错误或权限被拒等常规安装错误，直接返回结果，无需降级
                 return abbResult
             }
         }
 
-        // 2. 降级方案：Sync Push 到 /data/local/tmp + pm install
         return installApkLegacy(apkFile, options, onProgress)
+    }
+
+    /**
+     * 安装单体 APK InputStream (支持自动降级)
+     */
+    public suspend fun installApk(
+        apkStream: InputStream,
+        apkSize: Long,
+        options: AbbInstallOptions = AbbInstallOptions(),
+        onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        require(apkSize > 0) { "Invalid APK size: $apkSize" }
+
+        if (canTryAbb()) {
+            val abbResult = installApkAbbInternal(apkStream, apkSize, options, onProgress)
+            if (abbResult.isSuccess) {
+                isAbbSupportedCache = true
+                return@withContext abbResult
+            }
+
+            if (isAbbSupportedCache != false) {
+                return@withContext abbResult
+            }
+        }
+
+        // Legacy 降级：将流临时落盘后走 Sync Push + pm install
+        val tempFile = File.createTempFile("temp_install_", ".apk")
+        try {
+            tempFile.outputStream().use { output ->
+                apkStream.copyTo(output)
+            }
+            installApkLegacy(tempFile, options, onProgress)
+        } finally {
+            tempFile.delete()
+        }
     }
 
     /**
@@ -203,7 +232,6 @@ public class AdbAbbClient(
 
         var createResult = execAbb(createArgs)
         
-        // 若流开启失败（isAbbSupportedCache 被标记为 false），直接抛异常触发降级
         if (isAbbSupportedCache == false) {
             throw UnsupportedOperationException("ABB is not supported by device")
         }
@@ -264,7 +292,12 @@ public class AdbAbbClient(
         val tempPath = "/data/local/tmp/temp_${System.currentTimeMillis()}.apk"
         try {
             apkFile.inputStream().use { stream ->
-                syncClient.pushV2(stream, tempPath, apkFile.length(), onProgress = onProgress)
+                syncClient.pushV2(
+                    inputStream = stream,
+                    remotePath = tempPath,
+                    totalSize = apkFile.length(),
+                    onProgress = onProgress
+                )
             }
             val result = shellClient.execV2("pm install ${options.toArgs().joinToString(" ")} '$tempPath'")
             check(result.isSuccess && result.stdout.contains("Success")) {
@@ -537,10 +570,6 @@ public class AdbAbbClient(
 
     /**
      * 卸载指定的应用包 (支持 ABB 快速通道与 Shell 动态降级)
-     *
-     * @param packageName 目标应用包名 (例如: "com.example.app")
-     * @param options 卸载选项 (如保留数据、指定用户等)
-     * @return [Result<Unit>] 成功返回 Success，失败返回失败原因 Exception
      */
     public suspend fun uninstall(
         packageName: String,
@@ -551,7 +580,6 @@ public class AdbAbbClient(
 
             val extraArgs = options.toArgs()
 
-            // 1. 若未被判定为不支持，优先尝试 ABB (package uninstall) 快速通道
             if (canTryAbb()) {
                 val abbArgs = mutableListOf("package", "uninstall").apply {
                     addAll(extraArgs)
@@ -560,7 +588,6 @@ public class AdbAbbClient(
 
                 val abbResult = execAbb(abbArgs)
 
-                // 如果设备正常响应了 ABB 指令
                 if (isAbbSupportedCache != false) {
                     val output = "${abbResult.stdout} ${abbResult.stderr}".trim()
                     check(abbResult.isSuccess && output.contains("Success", ignoreCase = true)) {
@@ -569,10 +596,8 @@ public class AdbAbbClient(
                     isAbbSupportedCache = true
                     return@runCatching
                 }
-                // 若是因为 ABB 服务不可用导致 openStream 返回 null，自动流转到下方 Legacy 流程
             }
 
-            // 2. 降级方案：使用 Shell 执行 pm uninstall
             val legacyArgs = if (extraArgs.isNotEmpty()) "${extraArgs.joinToString(" ")} " else ""
             val command = "pm uninstall $legacyArgs'$packageName'"
             
