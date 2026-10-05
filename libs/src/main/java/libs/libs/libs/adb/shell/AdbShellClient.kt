@@ -12,32 +12,28 @@ import java.io.ByteArrayOutputStream
 public class AdbShellClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
-    public val supportsShellV2: Boolean get() = connection.hasFeature("shell_v2")
 
     /**
-     * 执行 Shell 指令（优先尝试 Shell V2，失败自动降级使用 V1）
+     * 执行 Shell 指令（乐观尝试 Shell V2，失败/不支持时自动无缝降级至 V1）
      */
     public suspend fun exec(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
-        if (supportsShellV2) {
-            val v2Result = execV2(command)
-            // 当 V2 建流失败时，自动降级至 V1 重新尝试
-            if (v2Result.exitCode == -1 && v2Result.stderr.contains("Failed to open shell_v2 stream")) {
-                return@withContext execV1(command)
-            }
-            v2Result
-        } else {
-            execV1(command)
+        // 1. 尝试 Shell V2 执行
+        val v2Result = execV2(command)
+        
+        // 2. 判断 V2 是否成功建立与执行：若 exitCode 为 -1 且 stderr 提示建流失败/未收到 exit 包，自动回退到 V1
+        if (v2Result.exitCode == -1 && (v2Result.stderr.contains("Failed to open shell_v2 stream") || v2Result.stdout.isEmpty())) {
+            return@withContext execV1(command)
         }
+        
+        v2Result
     }
 
     /**
-     * 以 Exec (V1) 模式发送命令
+     * 以 Exec (V1) 模式发送命令（使用 sentinel 机制解析 Exit Code）
      */
     public suspend fun execV1(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         val sentinel = "__ADB_EXIT_CODE_${startTime}__:"
-        // 1. \n 被转义为真正的 \n，由远端 printf 解析为换行
-        // 2. $? 确保运行时导出纯粹的 $? 由远端 Shell 解释 exit code
         val wrappedCommand = "($command); printf \"\n$sentinel%d\" \$?"
 
         val stream = connection.openStream("exec:$wrappedCommand")
@@ -100,6 +96,10 @@ public class AdbShellClient(
                     }
                 }
             }
+        } catch (e: Exception) {
+            return@withContext ShellCommandResult(
+                exitCode = -1, stdout = "", stderr = "Shell V2 read failed: ${e.message}", durationMs = System.currentTimeMillis() - startTime
+            )
         } finally {
             stream.close()
         }
@@ -113,66 +113,88 @@ public class AdbShellClient(
     }
 
     /**
-     * 读取无损 STDOUT 二进制字节数组（适用于二进制 Dump、截图等）
+     * 读取无损二进制字节数组（优先 Shell V2，降级使用标准 V1 exec 原始流）
      */
-    public suspend fun execV2RawBytes(command: String): ByteArray = withContext(Dispatchers.IO) {
-        val stream = connection.openStream("shell,v2,raw:$command")
-            ?: throw IllegalStateException("Failed to open shell_v2 stream")
-
-        val stdoutStream = ByteArrayOutputStream()
-        var exitCode = -1
-
-        try {
-            readShellV2Stream(stream) { packet ->
-                when (packet.id) {
-                    ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
-                    ShellV2Packet.ID_EXIT -> {
-                        if (packet.payload.isNotEmpty()) {
-                            exitCode = packet.payload[0].toUByte().toInt()
+    public suspend fun execRawBytes(command: String): ByteArray = withContext(Dispatchers.IO) {
+        // 尝试 V2 模式（无协议损耗）
+        val v2Stream = connection.openStream("shell,v2,raw:$command")
+        if (v2Stream != null) {
+            val stdoutStream = ByteArrayOutputStream()
+            var exitCode = -1
+            try {
+                readShellV2Stream(v2Stream) { packet ->
+                    when (packet.id) {
+                        ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
+                        ShellV2Packet.ID_EXIT -> {
+                            if (packet.payload.isNotEmpty()) {
+                                exitCode = packet.payload[0].toUByte().toInt()
+                            }
                         }
                     }
                 }
+                if (exitCode == 0) return@withContext stdoutStream.toByteArray()
+            } catch (_: Exception) {
+                // V2 读取失败则继续回退 V1
+            } finally {
+                v2Stream.close()
             }
-        } finally {
-            stream.close()
         }
 
-        check(exitCode == 0) { "Execution failed with exit code $exitCode" }
-        stdoutStream.toByteArray()
+        // 回退 V1 (exec:) 原始流读取
+        val v1Stream = connection.openStream("exec:$command")
+            ?: throw IllegalStateException("Failed to open exec stream for raw bytes")
+
+        val bytesOutput = ByteArrayOutputStream()
+        try {
+            while (true) {
+                val data = v1Stream.read() ?: break
+                if (data.isNotEmpty()) bytesOutput.write(data)
+            }
+        } finally {
+            v1Stream.close()
+        }
+
+        bytesOutput.toByteArray()
     }
 
+    @Deprecated("Use execRawBytes instead", ReplaceWith("execRawBytes(command)"))
+    public suspend fun execV2RawBytes(command: String): ByteArray = execRawBytes(command)
+
     /**
-     * 智能流式响应传输 (优先 Shell V2，失败无缝回退 V1)
+     * 智能流式传输 Flow（不依赖 Feature，优先 V2 建流，建流失败无缝回退 V1）
      */
     public fun execStream(command: String): Flow<ShellStreamChunk> = flow {
-        if (supportsShellV2) {
-            val stream = connection.openStream("shell,v2,raw:$command")
-            if (stream != null) {
-                try {
-                    readShellV2Stream(stream) { packet ->
-                        when (packet.id) {
-                            ShellV2Packet.ID_STDOUT -> emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
-                            ShellV2Packet.ID_STDERR -> emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
-                        }
+        // 尝试打开 V2 流
+        val v2Stream = connection.openStream("shell,v2,raw:$command")
+        if (v2Stream != null) {
+            var v2Success = false
+            try {
+                readShellV2Stream(v2Stream) { packet ->
+                    v2Success = true
+                    when (packet.id) {
+                        ShellV2Packet.ID_STDOUT -> emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
+                        ShellV2Packet.ID_STDERR -> emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
                     }
-                } finally {
-                    stream.close()
                 }
-                return@flow
+                if (v2Success) return@flow
+            } catch (_: Exception) {
+                // V2 中途解析异常，准备回退 V1
+            } finally {
+                v2Stream.close()
             }
         }
 
         // 降级使用 Exec V1 模式
-        val stream = connection.openStream("exec:$command") ?: return@flow
+        val v1Stream = connection.openStream("exec:$command") ?: return@flow
         try {
             while (true) {
-                val data = stream.read() ?: break
+                val data = v1Stream.read() ?: break
                 if (data.isNotEmpty()) {
                     emit(ShellStreamChunk(ShellStreamType.STDOUT, data))
                 }
             }
         } finally {
-            stream.close()
+            v1Stream.close()
         }
     }.flowOn(Dispatchers.IO)
 
