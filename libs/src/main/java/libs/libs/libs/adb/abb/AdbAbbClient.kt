@@ -111,27 +111,32 @@ public class AdbAbbClient(
         apkFile: File,
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null
-    ): Result<Unit> {
-        require(apkFile.exists()) { "APK file non-existent: ${apkFile.absolutePath}" }
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(apkFile.exists()) { "APK file non-existent: ${apkFile.absolutePath}" }
 
-        if (canTryAbb()) {
-            val abbResult = apkFile.inputStream().use { stream ->
-                installApkAbbInternal(stream, apkFile.length(), options, onProgress)
-            }
-            
-            if (abbResult.isSuccess) {
-                isAbbSupportedCache = true
-                return abbResult
+            if (canTryAbb()) {
+                val abbResult = apkFile.inputStream().use { stream ->
+                    installApkAbbInternal(stream, apkFile.length(), options, onProgress)
+                }
+
+                if (abbResult.isSuccess) {
+                    isAbbSupportedCache = true
+                    return@runCatching
+                }
+
+                // 如果显式判定为不支持，或者会话报错，清除缓存标记并降级到 Legacy
+                if (isAbbSupportedCache == false) {
+                    // 继续往下走 Legacy 流程
+                } else {
+                    // 如果尝试 ABB 过程中遭遇一般业务异常（如解析失败或参数错），直接抛出
+                    abbResult.getOrThrow()
+                }
             }
 
-            if (isAbbSupportedCache == false) {
-                // 自动进入 Legacy 降级流程
-            } else {
-                return abbResult
-            }
+            // 执行 Legacy 降级策略
+            installApkLegacy(apkFile, options, onProgress).getOrThrow()
         }
-
-        return installApkLegacy(apkFile, options, onProgress)
     }
 
     /**
@@ -143,29 +148,20 @@ public class AdbAbbClient(
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        require(apkSize > 0) { "Invalid APK size: $apkSize" }
+        runCatching {
+            require(apkSize > 0) { "Invalid APK size: $apkSize" }
 
-        if (canTryAbb()) {
-            val abbResult = installApkAbbInternal(apkStream, apkSize, options, onProgress)
-            if (abbResult.isSuccess) {
-                isAbbSupportedCache = true
-                return@withContext abbResult
+            // 为了保证降级时流数据不丢失，先将输入流写入临时文件
+            val tempFile = File.createTempFile("temp_install_", ".apk")
+            try {
+                tempFile.outputStream().use { output ->
+                    apkStream.copyTo(output)
+                }
+                
+                installApk(tempFile, options, onProgress).getOrThrow()
+            } finally {
+                tempFile.delete()
             }
-
-            if (isAbbSupportedCache != false) {
-                return@withContext abbResult
-            }
-        }
-
-        // Legacy 降级：将流临时落盘后走 Sync Push + pm install
-        val tempFile = File.createTempFile("temp_install_", ".apk")
-        try {
-            tempFile.outputStream().use { output ->
-                apkStream.copyTo(output)
-            }
-            installApkLegacy(tempFile, options, onProgress)
-        } finally {
-            tempFile.delete()
         }
     }
 
@@ -177,21 +173,25 @@ public class AdbAbbClient(
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        require(apksFile.exists()) { "APKS file non-existent: ${apksFile.absolutePath}" }
+        runCatching {
+            require(apksFile.exists()) { "APKS file non-existent: ${apksFile.absolutePath}" }
 
-        if (canTryAbb()) {
-            val abbResult = installApksAbbInternal(apksFile, options, onProgress)
-            if (abbResult.isSuccess) {
-                isAbbSupportedCache = true
-                return@withContext abbResult
+            if (canTryAbb()) {
+                val abbResult = installApksAbbInternal(apksFile, options, onProgress)
+                if (abbResult.isSuccess) {
+                    isAbbSupportedCache = true
+                    return@runCatching
+                }
+
+                if (isAbbSupportedCache == false) {
+                    // 标记为不支持，降级到 Legacy
+                } else {
+                    abbResult.getOrThrow()
+                }
             }
 
-            if (isAbbSupportedCache != false) {
-                return@withContext abbResult
-            }
+            installApksLegacy(apksFile, options, onProgress).getOrThrow()
         }
-
-        installApksLegacy(apksFile, options, onProgress)
     }
 
     /**
@@ -202,24 +202,28 @@ public class AdbAbbClient(
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        require(apks.isNotEmpty()) { "APKs map cannot be empty" }
+        runCatching {
+            require(apks.isNotEmpty()) { "APKs map cannot be empty" }
 
-        if (canTryAbb()) {
-            val abbResult = installSplitApksAbbInternal(apks, options, onProgress)
-            if (abbResult.isSuccess) {
-                isAbbSupportedCache = true
-                return@withContext abbResult
+            if (canTryAbb()) {
+                val abbResult = installSplitApksAbbInternal(apks, options, onProgress)
+                if (abbResult.isSuccess) {
+                    isAbbSupportedCache = true
+                    return@runCatching
+                }
+
+                if (isAbbSupportedCache == false) {
+                    // 标记为不支持，降级到 Legacy
+                } else {
+                    abbResult.getOrThrow()
+                }
             }
 
-            if (isAbbSupportedCache != false) {
-                return@withContext abbResult
-            }
+            installSplitApksLegacy(apks, options, onProgress).getOrThrow()
         }
-
-        installSplitApksLegacy(apks, options, onProgress)
     }
 
-    // 内部实现逻辑 (ABB 模式 vs Legacy 模式)
+    // ==================== 内部实现逻辑 (ABB 模式 vs Legacy 模式) ====================
 
     private suspend fun installApkAbbInternal(
         apkStream: InputStream,
@@ -231,7 +235,7 @@ public class AdbAbbClient(
         createArgs.addAll(options.toArgs())
 
         var createResult = execAbb(createArgs)
-        
+
         if (isAbbSupportedCache == false) {
             throw UnsupportedOperationException("ABB is not supported by device")
         }
@@ -249,38 +253,47 @@ public class AdbAbbClient(
             ?: throw IllegalStateException("Failed to parse session ID from: ${createResult.stdout}")
 
         try {
-            val writeDestination = buildDestination(
-                "abb_exec:",
-                listOf("package", "install-write", "-S", apkSize.toString(), sessionId, "base.apk", "-")
-            )
-            val writeStream = connection.openStream(writeDestination)
-                ?: throw IllegalStateException("Failed to open install-write stream")
-
-            try {
-                apkStream.use { input ->
-                    val buffer = ByteArray(64 * 1024)
-                    var bytesWritten = 0L
-                    var read: Int
-                    while (input.read(buffer).also { read = it } != -1) {
-                        if (read > 0) {
-                            val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
-                            writeStream.write(chunk)
-                            bytesWritten += read
-                            onProgress?.invoke(bytesWritten, apkSize)
-                        }
-                    }
-                }
-            } finally {
-                writeStream.close()
-            }
+            writeApkToAbbStream(sessionId, "base.apk", apkStream, apkSize, onProgress)
 
             val commitResult = execAbb(listOf("package", "install-commit", sessionId))
-            check(commitResult.isSuccess && commitResult.stdout.contains("Success")) {
+            check(commitResult.isSuccess && commitResult.stdout.contains("Success", ignoreCase = true)) {
                 "Failed to commit install session $sessionId: ${commitResult.stdout}${commitResult.stderr}"
             }
         } catch (e: Exception) {
             execAbb(listOf("package", "install-abandon", sessionId))
             throw e
+        }
+    }
+
+    private suspend fun writeApkToAbbStream(
+        sessionId: String,
+        splitName: String,
+        apkStream: InputStream,
+        size: Long,
+        onProgress: ((Long, Long) -> Unit)?
+    ) {
+        val writeDestination = buildDestination(
+            "abb_exec:",
+            listOf("package", "install-write", "-S", size.toString(), sessionId, splitName, "-")
+        )
+        val writeStream = connection.openStream(writeDestination)
+            ?: throw IllegalStateException("Failed to open install-write stream for $splitName")
+
+        try {
+            val buffer = ByteArray(64 * 1024)
+            var bytesWritten = 0L
+            var read: Int
+            while (apkStream.read(buffer).also { read = it } != -1) {
+                if (read > 0) {
+                    val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
+                    writeStream.write(chunk)
+                    bytesWritten += read
+                    onProgress?.invoke(bytesWritten, size)
+                }
+            }
+            writeStream.flush()
+        } finally {
+            writeStream.close()
         }
     }
 
@@ -300,7 +313,7 @@ public class AdbAbbClient(
                 )
             }
             val result = shellClient.execV2("pm install ${options.toArgs().joinToString(" ")} '$tempPath'")
-            check(result.isSuccess && result.stdout.contains("Success")) {
+            check(result.isSuccess && result.stdout.contains("Success", ignoreCase = true)) {
                 "Legacy install failed: ${result.stdout} ${result.stderr}"
             }
         } finally {
@@ -350,34 +363,16 @@ public class AdbAbbClient(
                     val splitName = entry.name.substringAfterLast('/').ifEmpty { "base.apk" }
                     val entrySize = entry.size
 
-                    val writeDestination = buildDestination(
-                        "abb_exec:",
-                        listOf("package", "install-write", "-S", entrySize.toString(), sessionId, splitName, "-")
-                    )
-
-                    val writeStream = connection.openStream(writeDestination)
-                        ?: throw IllegalStateException("Failed to open install-write stream for $splitName")
-
-                    try {
-                        zip.getInputStream(entry).use { apkStream ->
-                            val buffer = ByteArray(64 * 1024)
-                            var read: Int
-                            while (apkStream.read(buffer).also { read = it } != -1) {
-                                if (read > 0) {
-                                    val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
-                                    writeStream.write(chunk)
-                                    globalBytesWritten += read
-                                    onProgress?.invoke(globalBytesWritten, totalBytes)
-                                }
-                            }
+                    zip.getInputStream(entry).use { apkStream ->
+                        writeApkToAbbStream(sessionId, splitName, apkStream, entrySize) { written, _ ->
+                            globalBytesWritten += written
+                            onProgress?.invoke(globalBytesWritten, totalBytes)
                         }
-                    } finally {
-                        writeStream.close()
                     }
                 }
 
                 val commitResult = execAbb(listOf("package", "install-commit", sessionId))
-                check(commitResult.isSuccess && commitResult.stdout.contains("Success")) {
+                check(commitResult.isSuccess && commitResult.stdout.contains("Success", ignoreCase = true)) {
                     "Failed to commit install session $sessionId: ${commitResult.stdout}${commitResult.stderr}"
                 }
             } catch (e: Exception) {
@@ -434,7 +429,7 @@ public class AdbAbbClient(
                 }
 
                 val commitResult = shellClient.execV2("pm install-commit $sessionId")
-                check(commitResult.isSuccess && commitResult.stdout.contains("Success")) {
+                check(commitResult.isSuccess && commitResult.stdout.contains("Success", ignoreCase = true)) {
                     "Failed to commit session $sessionId: ${commitResult.stdout}${commitResult.stderr}"
                 }
             } catch (e: Exception) {
@@ -478,33 +473,17 @@ public class AdbAbbClient(
             apks.forEach { (splitName, streamWithSize) ->
                 val (stream, size) = streamWithSize
                 val safeSplitName = splitName.substringAfterLast('/').ifEmpty { "base.apk" }
-                val writeDestination = buildDestination(
-                    "abb_exec:",
-                    listOf("package", "install-write", "-S", size.toString(), sessionId, safeSplitName, "-")
-                )
-                val writeStream = connection.openStream(writeDestination)
-                    ?: throw IllegalStateException("Failed to open stream for $safeSplitName")
-
-                try {
-                    stream.use { input ->
-                        val buffer = ByteArray(64 * 1024)
-                        var read: Int
-                        while (input.read(buffer).also { read = it } != -1) {
-                            if (read > 0) {
-                                val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
-                                writeStream.write(chunk)
-                                globalBytesWritten += read
-                                onProgress?.invoke(globalBytesWritten, totalSize)
-                            }
-                        }
+                
+                stream.use { input ->
+                    writeApkToAbbStream(sessionId, safeSplitName, input, size) { written, _ ->
+                        globalBytesWritten += written
+                        onProgress?.invoke(globalBytesWritten, totalSize)
                     }
-                } finally {
-                    writeStream.close()
                 }
             }
 
             val commitResult = execAbb(listOf("package", "install-commit", sessionId))
-            check(commitResult.isSuccess && commitResult.stdout.contains("Success")) {
+            check(commitResult.isSuccess && commitResult.stdout.contains("Success", ignoreCase = true)) {
                 "Commit failed for session $sessionId: ${commitResult.stdout}${commitResult.stderr}"
             }
         } catch (e: Exception) {
@@ -554,7 +533,7 @@ public class AdbAbbClient(
             }
 
             val commitResult = shellClient.execV2("pm install-commit $sessionId")
-            check(commitResult.isSuccess && commitResult.stdout.contains("Success")) {
+            check(commitResult.isSuccess && commitResult.stdout.contains("Success", ignoreCase = true)) {
                 "Commit failed for session $sessionId: ${commitResult.stdout}${commitResult.stderr}"
             }
         } catch (e: Exception) {
