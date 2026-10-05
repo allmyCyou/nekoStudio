@@ -291,7 +291,7 @@ public class AdbAbbClient(
                     onProgress?.invoke(bytesWritten, size)
                 }
             }
-            writeStream.flush()
+            // Removed writeStream.flush() as AdbStream does not define flush()
         } finally {
             writeStream.close()
         }
