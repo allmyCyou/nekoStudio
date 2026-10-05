@@ -44,6 +44,14 @@ public class AdbClient(
     public val keyManager: AdbKeyManager,
     public val connection: AdbConnection = AdbConnection(keyManager)
 ) {
+    public companion object {
+        /**
+         * 默认 ADB System Identity 描述字符串 (支持 shell_v2, cmd, sendrecv_v2 等全特性集)
+         */
+        public const val DEFAULT_SYSTEM_IDENTITY: String =
+            "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,devraw,app_info,server_status,delayed_ack;"
+    }
+
     // 1. 核心交互子模块 (确保密钥初始化并在 Connection 状态更新时正常运行)
     public val shell: AdbShellClient = AdbShellClient(connection)
     public val abb: AdbAbbClient = AdbAbbClient(connection)
@@ -159,7 +167,7 @@ public class AdbClient(
     public suspend fun connect(
         host: String,
         port: Int = 5555,
-        systemIdentity: String = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,devraw,app_info,server_status,delayed_ack;",
+        systemIdentity: String = DEFAULT_SYSTEM_IDENTITY,
         timeoutMs: Long = 10000L
     ): Result<AdbConnectionState.Connected> = runCatching {
         ensureKeyLoaded()
@@ -178,7 +186,7 @@ public class AdbClient(
     public suspend fun mdnsConnect(
         context: Context,
         deviceName: String? = null,
-        systemIdentity: String = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,devraw,app_info,server_status,delayed_ack;",
+        systemIdentity: String = DEFAULT_SYSTEM_IDENTITY,
         mdnsTimeoutMs: Long = 10000L,
         connectTimeoutMs: Long = 10000L
     ): Result<AdbConnectionState.Connected> = mdnsConnect(
@@ -195,7 +203,7 @@ public class AdbClient(
     public suspend fun mdnsConnect(
         mdnsManager: AdbMdnsManager,
         deviceName: String? = null,
-        systemIdentity: String = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,devraw,app_info,server_status,delayed_ack;",
+        systemIdentity: String = DEFAULT_SYSTEM_IDENTITY,
         mdnsTimeoutMs: Long = 10000L,
         connectTimeoutMs: Long = 10000L
     ): Result<AdbConnectionState.Connected> = runCatching {
