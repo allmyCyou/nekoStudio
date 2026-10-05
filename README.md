@@ -14,6 +14,7 @@
   - [x] connect
   - [x] disconnect
   - [x] shell
+  - [x] --shell-exit
   - [x] root
   - [x] unroot
   - [x] install
