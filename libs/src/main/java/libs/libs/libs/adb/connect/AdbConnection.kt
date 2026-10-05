@@ -178,12 +178,17 @@ public class AdbConnection(
     }
 
     private fun parseFeatures(banner: String): Set<String> {
-        val featuresSegment = banner.split(';')
-            .firstOrNull { it.startsWith("features=") } ?: return emptySet()
+        // 1. 清理 C 风格空字符 '\0'、换行符及前后空格
+        val cleanBanner = banner.trim { it <= ' ' || it == '\u0000' }
 
-        return featuresSegment.removePrefix("features=")
+        val featuresSegment = cleanBanner.split(';')
+            .firstOrNull { it.trim().startsWith("features=") } ?: return emptySet()
+
+        return featuresSegment.trim()
+            .removePrefix("features=")
             .split(',')
-            .filter { it.isNotBlank() }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
             .toSet()
     }
 
