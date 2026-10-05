@@ -211,6 +211,9 @@ public class AdbConnection(
                     maxPayloadSize = negotiatedMaxPayloadSize,
                     initialAvailableSendBytes = initialTxCredit
                 )
+
+                // 关键修复：务必在移除 pendingOpenRequests 之前将 stream 写入 activeStreams！
+                // 防止 dispatchLoop 在高并发下读到后续的 CMD_WRTE 时 activeStreams 为空而给对端误发 CMD_CLSE。
                 activeStreams[localId] = stream
                 return@withContext stream
             } else {

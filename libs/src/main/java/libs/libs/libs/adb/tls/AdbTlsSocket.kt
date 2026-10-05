@@ -9,14 +9,10 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
-import java.security.MessageDigest
 import java.security.Principal
 import java.security.PrivateKey
-import java.security.Provider
-import java.security.PublicKey
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
-import java.util.Locale
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLException
@@ -51,19 +47,17 @@ public class AdbTlsSocket(
             autoClose: Boolean = true,
             handshakeTimeoutMs: Int = 10000
         ): AdbTlsSocket = withContext(Dispatchers.IO) {
-            val host = rawSocket.inetAddress?.hostAddress ?: "localhost"
             val port = rawSocket.port
-
             val sslContext = createSslContext(keyManager)
 
+            // 关键修复：host 必须传入 null！
+            // 防止 Conscrypt 将 IP 地址写进 SNI 扩展导致 adbd (BoringSSL) 拒绝连接并挂断。
             val ssl = sslContext.socketFactory.createSocket(
-                rawSocket, host, port, autoClose
+                rawSocket, null, port, autoClose
             ) as SSLSocket
 
-            // 明确指定客户端模式
             ssl.useClientMode = true
 
-            // AOSP adbd 强制要求 TLS 1.3
             val supportedProtocols = ssl.supportedProtocols
             if ("TLSv1.3" in supportedProtocols) {
                 ssl.enabledProtocols = arrayOf("TLSv1.3")
@@ -128,10 +122,8 @@ public class AdbTlsSocket(
         private fun createSslContext(keyManager: AdbKeyManager): SSLContext {
             val keyPair = keyManager.getKeyPair()
             val cert = AdbTlsCertificate.generateSelfSignedCertificate(keyPair)
-            val pubKeyFingerprint = getAdbTlsFingerprintHex(keyPair.public)
 
             val directKeyManager = object : X509ExtendedKeyManager() {
-                // 不限制 KeyType，适应 RSA 及 EC 等不同密钥算法
                 override fun getClientAliases(keyType: String?, issuers: Array<out Principal>?): Array<String> {
                     return arrayOf(CLIENT_ALIAS)
                 }
@@ -162,23 +154,9 @@ public class AdbTlsSocket(
                 override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
             })
 
-            // 获取 TLS Context，优先使用默认，遇到问题再回退至 Conscrypt Provider
-            val sslContext = try {
-                SSLContext.getInstance("TLSv1.3")
-            } catch (_: Throwable) {
-                val providerClass = Class.forName("org.conscrypt.OpenSSLProvider")
-                val provider = providerClass.getDeclaredConstructor().newInstance() as Provider
-                SSLContext.getInstance("TLSv1.3", provider)
-            }
-
+            val sslContext = SSLContext.getInstance("TLSv1.3")
             sslContext.init(arrayOf(directKeyManager), trustAllCerts, SecureRandom())
             return sslContext
-        }
-
-        private fun getAdbTlsFingerprintHex(publicKey: PublicKey): String {
-            val digest = MessageDigest.getInstance("SHA-256")
-            val hash = digest.digest(publicKey.encoded)
-            return hash.joinToString("") { "%02X".format(it) }
         }
     }
 }

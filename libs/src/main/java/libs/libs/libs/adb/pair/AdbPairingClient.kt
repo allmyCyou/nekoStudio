@@ -72,13 +72,12 @@ public class AdbPairingClient(
                     override fun getPrivateKey(alias: String?): PrivateKey = keyPair.private
                 }
 
-                // 优先使用 Android 系统原生的 Conscrypt Provider
                 val sslContext = try {
+                    SSLContext.getInstance("TLSv1.3")
+                } catch (_: Throwable) {
                     val providerClass = Class.forName("org.conscrypt.OpenSSLProvider")
                     val provider = providerClass.getDeclaredConstructor().newInstance() as Provider
                     SSLContext.getInstance("TLSv1.3", provider)
-                } catch (_: Throwable) {
-                    SSLContext.getInstance("TLSv1.3")
                 }
 
                 sslContext.init(
