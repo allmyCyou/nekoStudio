@@ -242,13 +242,11 @@ public class AdbClient(
 
     public suspend fun listFiles(remotePath: String): List<FileStatV2> = sync.listV2(remotePath)
 
-    // Shell 与日志流 API
-
     /**
      * 实时获取 logcat 日志流，自动调度到 IO 线程，并确保上层流取消时正确清理流资源
      */
     public fun streamLogcat(args: String = "-v time"): Flow<ShellStreamChunk> {
-        return shell.execV2Stream("logcat $args")
+        return shell.execStream("logcat $args")
             .flowOn(Dispatchers.IO)
     }
 }
