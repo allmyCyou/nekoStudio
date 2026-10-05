@@ -48,11 +48,10 @@ public class AdbConnection(
     public val isSkipChecksum: Boolean 
         get() = socket.isTls 
 
-    // 这里以 Redmi K80 设备的特征为准来显式声明
     public suspend fun connect(
         host: String,
         port: Int = 5555,
-        systemIdentity: String = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,devraw,app_info,server_status,delayed_ack;",
+        systemIdentity: String? = null,
         timeoutMs: Long = 10000L,
         directTls: Boolean = false
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
@@ -67,12 +66,23 @@ public class AdbConnection(
                     socket.connectRaw(host, port, timeoutMs.toInt())
                 }
 
-                // 1. 修复：使用 buildConnectPayload 附带 features 宣告
+                // 1. 标准化构造 Host Features 声明 (确保不带尾部分号且包含 \0)
+                val defaultFeatureList = listOf(
+                    "shell_v2", "cmd", "stat_v2", "ls_v2", "fixed_push_mkdir",
+                    "apex", "abb", "fixed_push_symlink_timestamp", "abb_exec",
+                    "remount_shell", "track_app", "sendrecv_v2", "sendrecv_v2_brotli",
+                    "sendrecv_v2_lz4", "sendrecv_v2_zstd", "sendrecv_v2_dry_run_send",
+                    "openscreen_mdns", "devicetracker_proto_format", "devraw",
+                    "app_info", "server_status", "delayed_ack"
+                )
+                
+                val finalIdentity = systemIdentity ?: "host::features=${defaultFeatureList.joinToString(",")}"
+
                 val cnxnPacket = AdbPacket.createCnxn(
                     version = AdbCommand.A_VERSION,
                     maxPayload = AdbCommand.CONNECT_MAXDATA,
-                    features = AdbCommand.DEFAULT_FEATURES,
-                    systemIdentity = systemIdentity
+                    features = defaultFeatureList,
+                    systemIdentity = finalIdentity
                 )
                 
                 socket.writePacket(cnxnPacket, skipChecksum = socket.isTls)
@@ -158,7 +168,6 @@ public class AdbConnection(
                         continue
                     }
 
-                    // 遇到未知流的 WRTE，才向对端发 CLSE 拒绝
                     if (packet.command == AdbCommand.CMD_WRTE) {
                         val closePacket = AdbPacket(
                             command = AdbCommand.CMD_CLSE,
@@ -177,10 +186,12 @@ public class AdbConnection(
 
     private fun parseFeatures(banner: String): Set<String> {
         val featuresSegment = banner.split(';')
-            .firstOrNull { it.startsWith("features=") } ?: return emptySet()
+            .firstOrNull { it.trim().startsWith("features=") } ?: return emptySet()
 
-        return featuresSegment.removePrefix("features=")
+        return featuresSegment.trim()
+            .removePrefix("features=")
             .split(',')
+            .map { it.trim() }
             .filter { it.isNotBlank() }
             .toSet()
     }
@@ -188,9 +199,11 @@ public class AdbConnection(
     public suspend fun openStream(destination: String): AdbStream? = withContext(Dispatchers.IO) {
         check(state.value is AdbConnectionState.Connected) { "ADB Connection is not active" }
 
+        // 2. 确保 A_OPEN 的 destination 字符串以 NUL ('\0') 字节结尾
+        val formattedDestination = if (destination.endsWith("\u0000")) destination else "$destination\u0000"
+
         val localId = localIdGenerator.getAndIncrement()
 
-        // 预先创建 Stream 并注册入 activeStreams，解决 Race Condition
         val stream = AdbStream(
             connection = this@AdbConnection,
             localId = localId,
@@ -201,11 +214,10 @@ public class AdbConnection(
         try {
             val isDelayedAck = hasFeature(AdbCommand.FEATURE_DELAYED_ACK)
             val initialRxWindow = if (isDelayedAck) negotiatedMaxPayloadSize else 0
-            val openPacket = AdbPacket.createOpen(localId, destination, initialRxWindow)
+            val openPacket = AdbPacket.createOpen(localId, formattedDestination, initialRxWindow)
 
             sendPacket(openPacket)
 
-            // 等待 dispatchLoop 收到 OKAY 并唤醒 stream
             val openSuccess = withTimeoutOrNull(5000L) { stream.awaitOpen() } != null
 
             if (openSuccess) {
