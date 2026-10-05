@@ -110,6 +110,7 @@ import com.adb.kitty.service.*
 import com.adb.kitty.R
 
 import libs.libs.libs.adb.abb.AbbUninstallOptions
+import libs.libs.libs.adb.connect.AdbStream
 
 @Keep
 class MainActivity : ComponentActivity() {
@@ -1092,7 +1093,7 @@ class MainActivity : ComponentActivity() {
 
                     "--shell-exit" -> {
                         appendLog("[info] 已主动关闭 adb Shell 流")
-                        val res = client.shell.exit()
+                        val res = client.shell.exit(AdbStream)
                         appendLog(res.stdout.ifEmpty { res.stderr })
                     }
 
