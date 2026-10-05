@@ -109,6 +109,8 @@ import com.adb.kitty.data.fastboot.*
 import com.adb.kitty.service.*
 import com.adb.kitty.R
 
+import libs.libs.libs.adb.mdns.AdbMdnsType
+
 @Keep
 class MainActivity : ComponentActivity() {
     companion object {
