@@ -9,6 +9,7 @@ import libs.libs.libs.adb.connect.AdbConnection
 import libs.libs.libs.adb.connect.AdbConnectionState
 import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.mdns.AdbMdnsManager
+import libs.libs.libs.adb.mdns.AdbMdnsType
 import libs.libs.libs.adb.pair.AdbPairingListener
 import libs.libs.libs.adb.pair.AdbPairingManager
 import libs.libs.libs.adb.root.AdbRootClient
@@ -23,15 +24,17 @@ import libs.libs.libs.adb.usb.host.AdbUsbHostConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.ExperimentalSerializationApi
 import java.io.File
 import java.io.InputStream
 
 /**
  * 统一 ADB 客户端门面 (Facade)
- * 整合 Connection、Pair (SPAKE2)、Shell、ABB、Sync(V2)、Root 以及 USB Host/Accessory 模块
+ * 整合 Connection、Pair (SPAKE2)、Shell、ABB、Sync(V2)、Root、mDNS 自动发现 以及 USB Host/Accessory 模块
  */
 @OptIn(ExperimentalSerializationApi::class)
 public class AdbClient(
@@ -104,6 +107,48 @@ public class AdbClient(
     }
 
     /**
+     * 通过 mDNS 自动搜索局域网内的配对服务并完成无线配对
+     *
+     * @param context Context 实例
+     * @param pairingCode 6 位无线配对码
+     * @param deviceName 可选，过滤匹配的设备名称关键词 (为 null 时自动选中搜索到的第一个匹配项)
+     * @param timeoutMs mDNS 搜索超时时间 (单位: 毫秒)
+     * @param listener 配对过程监听回调
+     */
+    public suspend fun mdnsPair(
+        context: Context,
+        pairingCode: String,
+        deviceName: String? = null,
+        timeoutMs: Long = 10000L,
+        listener: AdbPairingListener? = null
+    ): Result<String> = mdnsPair(createMdnsManager(context), pairingCode, deviceName, timeoutMs, listener)
+
+    /**
+     * 通过传入的 AdbMdnsManager 实例搜索配对服务并完成无线配对
+     */
+    public suspend fun mdnsPair(
+        mdnsManager: AdbMdnsManager,
+        pairingCode: String,
+        deviceName: String? = null,
+        timeoutMs: Long = 10000L,
+        listener: AdbPairingListener? = null
+    ): Result<String> = runCatching {
+        val service = withTimeoutOrNull(timeoutMs) {
+            mdnsManager.discoverServices(AdbMdnsType.PAIRING)
+                .firstOrNull { info ->
+                    info.ipAddress != null && (deviceName == null || info.name.contains(deviceName, ignoreCase = true))
+                }
+        } ?: throw IllegalStateException("未在 $timeoutMs ms 内找到匹配的 mDNS 配对服务")
+
+        pair(
+            host = service.ipAddress!!,
+            port = service.port,
+            pairingCode = pairingCode,
+            listener = listener
+        ).getOrThrow()
+    }
+
+    /**
      * 连接 TCP 无线/网络设备
      * 明确返回连接结果 Result<AdbConnectionState.Connected>，方便上层业务判断连接是否成功
      */
@@ -115,6 +160,87 @@ public class AdbClient(
     ): Result<AdbConnectionState.Connected> = runCatching {
         ensureKeyLoaded()
         connection.connect(host, port, systemIdentity, timeoutMs)
+    }
+
+    /**
+     * 通过 mDNS 自动搜索局域网内的 TLS 调试服务并建立 ADB 连接
+     *
+     * @param context Context 实例
+     * @param deviceName 可选，过滤匹配的设备名称关键词 (为 null 时自动选中搜索到的第一个匹配项)
+     * @param systemIdentity 系统的 ADB 识别标识串
+     * @param mdnsTimeoutMs mDNS 搜索超时时间 (单位: 毫秒)
+     * @param connectTimeoutMs Socket/TLS 建连超时时间 (单位: 毫秒)
+     */
+    public suspend fun mdnsConnect(
+        context: Context,
+        deviceName: String? = null,
+        systemIdentity: String = "host::nekoStudio@adbClient;",
+        mdnsTimeoutMs: Long = 10000L,
+        connectTimeoutMs: Long = 10000L
+    ): Result<AdbConnectionState.Connected> = mdnsConnect(
+        mdnsManager = createMdnsManager(context),
+        deviceName = deviceName,
+        systemIdentity = systemIdentity,
+        mdnsTimeoutMs = mdnsTimeoutMs,
+        connectTimeoutMs = connectTimeoutMs
+    )
+
+    /**
+     * 通过传入的 AdbMdnsManager 实例搜索 TLS 调试服务并建立 ADB 连接
+     */
+    public suspend fun mdnsConnect(
+        mdnsManager: AdbMdnsManager,
+        deviceName: String? = null,
+        systemIdentity: String = "host::nekoStudio@adbClient;",
+        mdnsTimeoutMs: Long = 10000L,
+        connectTimeoutMs: Long = 10000L
+    ): Result<AdbConnectionState.Connected> = runCatching {
+        val service = withTimeoutOrNull(mdnsTimeoutMs) {
+            mdnsManager.discoverServices(AdbMdnsType.CONNECT)
+                .firstOrNull { info ->
+                    info.ipAddress != null && (deviceName == null || info.name.contains(deviceName, ignoreCase = true))
+                }
+        } ?: throw IllegalStateException("未在 $mdnsTimeoutMs ms 内找到匹配的 mDNS 调试服务")
+
+        connect(
+            host = service.ipAddress!!,
+            port = service.port,
+            systemIdentity = systemIdentity,
+            timeoutMs = connectTimeoutMs
+        ).getOrThrow()
+    }
+
+    /**
+     * 搜索局域网内所有匹配的 mDNS 服务设备列表
+     *
+     * @param context Context 实例
+     * @param type 服务类型：AdbMdnsType.CONNECT (调试) 或 AdbMdnsType.PAIRING (配对)
+     * @param scanDurationMs 持续扫描搜索的时间（单位：毫秒）
+     */
+    public suspend fun mdnsList(
+        context: Context,
+        type: AdbMdnsType = AdbMdnsType.CONNECT,
+        scanDurationMs: Long = 3000L
+    ): List<AdbMdnsServiceInfo> = mdnsList(createMdnsManager(context), type, scanDurationMs)
+
+    /**
+     * 通过传入的 AdbMdnsManager 实例搜索局域网内所有 mDNS 服务设备列表
+     */
+    public suspend fun mdnsList(
+        mdnsManager: AdbMdnsManager,
+        type: AdbMdnsType = AdbMdnsType.CONNECT,
+        scanDurationMs: Long = 3000L
+    ): List<AdbMdnsServiceInfo> {
+        val list = mutableListOf<AdbMdnsServiceInfo>()
+        withTimeoutOrNull(scanDurationMs) {
+            mdnsManager.discoverServices(type).collect { service ->
+                // 仅收集成功解析出 IP 地址的设备，并防止重名重复添加
+                if (service.ipAddress != null && list.none { it.name == service.name && it.port == service.port }) {
+                    list.add(service)
+                }
+            }
+        }
+        return list
     }
 
     public fun disconnect() {

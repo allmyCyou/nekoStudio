@@ -967,7 +967,7 @@ class MainActivity : ComponentActivity() {
                         }
 
                         appendLog("[info] 正在连接 $host:$port")
- 
+
                         // 捕获 connect 返回的 Result，进行成功/失败的分支处理
                         val result = client.connect(host, port)
 
@@ -1016,14 +1016,90 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    "mdns" -> {
+                        val flag = tokens.getOrNull(1)?.lowercase()
+                        val context = this
+
+                        when (flag) {
+                            "-l", "--list" -> {
+                                val subType = tokens.getOrNull(2)?.lowercase()
+                                val isPairing = subType == "pair" || subType == "-p"
+                                val mdnsType = if (isPairing) AdbMdnsType.PAIRING else AdbMdnsType.CONNECT
+                                val typeName = if (isPairing) "无线配对" else "无线调试"
+
+                                appendLog("[info] 正在扫描局域网内的 mDNS $typeName 设备 (扫描 3 秒)...")
+
+                                val devices = client.mdnsList(
+                                    context = context,
+                                    type = mdnsType,
+                                    scanDurationMs = 3000L
+                                )
+
+                                if (devices.isEmpty()) {
+                                    appendLog("[info] 未找到任何开启 $typeName 的 mDNS 设备")
+                                } else {
+                                    appendLog("[success] 共找到 ${devices.size} 个 $typeName 设备:")
+                                    devices.forEachIndexed { index, dev ->
+                                        appendLog("  [${index + 1}] 设备名: ${dev.name} | 地址: ${dev.ipAddress}:${dev.port}")
+                                    }
+                                }
+                            }
+
+                            "-p", "--pair" -> {
+                                val code = tokens.getOrNull(2)
+                                if (code.isNullOrBlank()) {
+                                    appendLog("[error] 请指定配对码，例: mdns -p 123456")
+                                    return@launch
+                                }
+                                val deviceFilter = tokens.getOrNull(3)
+                                appendLog("[info] 正在通过 mDNS 自动搜索设备并尝试配对 (验证码: $code)...")
+
+                                val result = client.mdnsPair(
+                                    context = context,
+                                    pairingCode = code,
+                                    deviceName = deviceFilter
+                                )
+
+                                result.onSuccess { msg ->
+                                    appendLog("[success] mDNS 配对成功: $msg")
+                                }.onFailure { e ->
+                                    appendLog("[error] mDNS 配对失败: ${e.message ?: "未搜索到配对服务或超时"}")
+                                }
+                            }
+
+                            "-c", "--connect" -> {
+                                val deviceFilter = tokens.getOrNull(2)
+                                appendLog("[info] 正在通过 mDNS 自动搜索局域网内的 ADB 调试设备...")
+
+                                val result = client.mdnsConnect(
+                                    context = context,
+                                    deviceName = deviceFilter
+                                )
+
+                                result.onSuccess { connected ->
+                                    appendLog("[success] mDNS 连接成功 (${connected.banner})")
+                                }.onFailure { e ->
+                                    appendLog("[error] mDNS 连接失败: ${e.message ?: "未搜索到调试服务或超时"}")
+                                }
+                            }
+
+                            else -> {
+                                appendLog("[error] 未知参数。用法:\n" +
+                                        "  mdns -l [connect|pair] : 扫描设备列表\n" +
+                                        "  mdns -c [设备名]         : 自动搜索并连接调试设备\n" +
+                                        "  mdns -p <配对码> [设备名] : 自动搜索并进行无线配对")
+                            }
+                        }
+                    }
+
                     "shell" -> {
-                        val cmd = subCmd.removePrefix("shell").trim()
+                        val cmd = adbCmd.removePrefix("shell").trim()
                         val res = client.shell.execV2(cmd)
                         appendLog(res.stdout.ifEmpty { res.stderr })
                     }
 
                     "install" -> {
-                        val path = subCmd.removePrefix("install").trim()
+                        val path = adbCmd.removePrefix("install").trim()
                         val apkFile = File(path)
                         if (!apkFile.exists()) {
                             appendLog("[error] APK 文件不存在: $path")
@@ -1042,7 +1118,7 @@ class MainActivity : ComponentActivity() {
 
                     else -> {
                         // 透传 Shell 命令
-                        val res = client.shell.execV2(subCmd)
+                        val res = client.shell.exec(adbCmd)
                         val output = res.stdout.ifEmpty { res.stderr }
                         appendLog(output.ifEmpty { "[exec finish, exit code ${res.exitCode}]" })
                     }
