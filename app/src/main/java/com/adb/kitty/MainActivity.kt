@@ -137,11 +137,19 @@ class MainActivity : ComponentActivity() {
     private var showAppSigBottomSheet by mutableStateOf(false)
     private var selectedSigReport by mutableStateOf<String?>(null)
     
-    // adb 与 fastboot 使用的路径
+    // fastboot 使用的路径
     private val flashFolder by lazy { File(getExternalFilesDir(null), "flash") }
     private fun ensureFlashDirExists() {
         if (!flashFolder.exists()) {
             flashFolder.mkdirs()
+        }
+    }
+
+    // adb 使用的路径
+    private val adbFolder by lazy { File(getExternalFilesDir(null), "adb") }
+    private fun ensureAdbDirExists() {
+        if (!adbFolder.exists()) {
+            adbFolder.mkdirs()
         }
     }
 
@@ -524,8 +532,15 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // 初始化 USB 管理器
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
+
+        // 初始化目录
         ensureFlashDirExists()
+        ensureAdbDirExists()
+        ensureLogsDirExists()
+
+        // 前台服务启动
         tryToStartService()
 
         // USB 权限回调广播（单独注册为 NOT_EXPORTED）
