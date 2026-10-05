@@ -51,6 +51,9 @@ public class AdbConnection(
     public val isSkipChecksum: Boolean 
         get() = socket.isTls || negotiatedVersion >= AdbCommand.A_VERSION_SKIP_CHECKSUM
 
+    /**
+     * 连接入口：根据 directTls 参数彻底拆分到不同的握手流水线
+     */
     public suspend fun connect(
         host: String,
         port: Int = 5555,
@@ -63,59 +66,11 @@ public class AdbConnection(
             _state.value = AdbConnectionState.Connecting
 
             val connectedState: AdbConnectionState.Connected = withTimeout(timeoutMs) {
-                // 1. 建立基础 Socket 或 Direct TLS 连接
                 if (directTls) {
-                    socket.connectTls(host, port, keyManager, timeoutMs.toInt())
+                    connectDirectTlsFlow(host, port, systemIdentity, timeoutMs)
                 } else {
-                    socket.connectRaw(host, port, timeoutMs.toInt())
+                    connectTcpFlow(host, port, systemIdentity, timeoutMs)
                 }
-
-                // 2. 发送第一个 CNXN 握手报文
-                val cnxnPacket = AdbPacket.createCnxn(
-                    version = AdbCommand.A_VERSION,
-                    maxPayload = AdbCommand.CONNECT_MAXDATA,
-                    features = AdbCommand.DEFAULT_FEATURES,
-                    systemIdentity = systemIdentity
-                )
-                socket.writePacket(cnxnPacket, skipChecksum = socket.isTls)
-
-                var response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
-
-                // 3. 拦截 CMD_STLS (Android 11+ StartTLS 升级)
-                if (response.command == AdbCommand.CMD_STLS) {
-                    val stlsAck = AdbPacket.createStls(AdbCommand.A_STLS_VERSION)
-                    socket.writePacket(stlsAck, skipChecksum = false)
-
-                    socket.upgradeToTls(keyManager, timeoutMs.toInt())
-
-                    // TLS 升级完成，重新发送加密通道后的 CNXN 握手
-                    socket.writePacket(cnxnPacket, skipChecksum = true)
-                    response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = true)
-                }
-
-                // 4. 拦截 CMD_AUTH 挑战 (传统/非 TLS RSA 签名鉴权)
-                if (response.command == AdbCommand.CMD_AUTH) {
-                    _state.value = AdbConnectionState.Authenticating
-                    response = handleRsaAuthentication(response)
-                }
-
-                // 5. 校验最终握手响应
-                if (response.command != AdbCommand.CMD_CNXN) {
-                    throw IllegalStateException("Unexpected packet during handshake: 0x${Integer.toHexString(response.command)}")
-                }
-
-                negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
-                val peerMaxData = response.arg1
-                if (peerMaxData > 0) {
-                    negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.CONNECT_MAXDATA)
-                }
-
-                val banner = String(response.payload, Charsets.UTF_8).trimEnd('\u0000')
-                _features = parseFeatures(banner)
-
-                val state = AdbConnectionState.Connected(banner)
-                _state.value = state
-                state
             }
 
             startDispatchLoop()
@@ -129,15 +84,92 @@ public class AdbConnection(
         }
     }
 
+    // 分流 1：Direct TLS 连接流水线 (如 Android 11+ 无线调试 TLS 端口)
+    private suspend fun connectDirectTlsFlow(
+        host: String,
+        port: Int,
+        systemIdentity: String,
+        timeoutMs: Long
+    ): AdbConnectionState.Connected {
+        // 1. 直接建立底层 TLS 双向认证连接
+        socket.connectTls(host, port, keyManager, timeoutMs.toInt())
+
+        // 2. 在 TLS 通道内直接发送 CNXN 握手（TLS 模式全程忽略 Checksum）
+        val cnxnPacket = AdbPacket.createCnxn(
+            version = AdbCommand.A_VERSION,
+            maxPayload = AdbCommand.CONNECT_MAXDATA,
+            features = AdbCommand.DEFAULT_FEATURES,
+            systemIdentity = systemIdentity
+        )
+        socket.writePacket(cnxnPacket, skipChecksum = true)
+
+        // 3. 读取 TLS 响应报文
+        val response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = true)
+
+        if (response.command != AdbCommand.CMD_CNXN) {
+            throw IllegalStateException("Direct TLS Handshake failed: expected CMD_CNXN but received 0x${Integer.toHexString(response.command)}")
+        }
+
+        return finalizeHandshake(response)
+    }
+
+    // 分流 2：传统 TCP / StartTLS 动态升级流水线 (如 5555 端口 / USB)
+    private suspend fun connectTcpFlow(
+        host: String,
+        port: Int,
+        systemIdentity: String,
+        timeoutMs: Long
+    ): AdbConnectionState.Connected {
+        // 1. 建立基础 Raw TCP Socket
+        socket.connectRaw(host, port, timeoutMs.toInt())
+
+        // 2. 发送初始 CNXN 报文（标准 TCP 模式下需计算 Checksum）
+        val cnxnPacket = AdbPacket.createCnxn(
+            version = AdbCommand.A_VERSION,
+            maxPayload = AdbCommand.CONNECT_MAXDATA,
+            features = AdbCommand.DEFAULT_FEATURES,
+            systemIdentity = systemIdentity
+        )
+        socket.writePacket(cnxnPacket, skipChecksum = false)
+
+        var response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = false)
+
+        // 3. 分流处理：是否触发 Android 11+ StartTLS 协议升级
+        if (response.command == AdbCommand.CMD_STLS) {
+            val stlsAck = AdbPacket.createStls(AdbCommand.A_STLS_VERSION)
+            socket.writePacket(stlsAck, skipChecksum = false)
+
+            // 升级当前 Socket 为 TLS
+            socket.upgradeToTls(keyManager, timeoutMs.toInt())
+
+            // TLS 升级成功后，必须在加密通道内重发 CNXN 报文，后续全部 skipChecksum
+            socket.writePacket(cnxnPacket, skipChecksum = true)
+            response = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = true)
+        }
+
+        // 4. 分流处理：传统 RSA 签名鉴权 (CMD_AUTH)
+        if (response.command == AdbCommand.CMD_AUTH) {
+            _state.value = AdbConnectionState.Authenticating
+            response = handleRsaAuthentication(response)
+        }
+
+        // 5. 校验最终响应
+        if (response.command != AdbCommand.CMD_CNXN) {
+            throw IllegalStateException("TCP Handshake failed: expected CMD_CNXN but received 0x${Integer.toHexString(response.command)}")
+        }
+
+        return finalizeHandshake(response)
+    }
+
     /**
-     * 处理 CMD_AUTH Challenge/Response 鉴权流程
+     * 处理传统 TCP 模式下的 CMD_AUTH Challenge/Response 鉴权流程
      */
     private suspend fun handleRsaAuthentication(initialAuthPacket: AdbPacket): AdbPacket {
         var currentPacket = initialAuthPacket
 
         while (currentPacket.command == AdbCommand.CMD_AUTH) {
             if (currentPacket.arg0 == AdbCommand.AUTH_TOKEN) {
-                // 1. 使用 AdbKeyManager.signToken 对对端 Token 签名
+                // 尝试用私钥签名 Token
                 val token = currentPacket.payload
                 val signature = keyManager.signToken(token)
                 val authSigPacket = AdbPacket.createAuth(AdbCommand.AUTH_SIGNATURE, signature)
@@ -145,13 +177,13 @@ public class AdbConnection(
 
                 currentPacket = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
 
-                // 2. 签名验证失败时，使用 AdbKeyManager.getAdbPublicKeyBytes 发送 RSA 公钥以触发设备弹窗授权
+                // 签名不通过（对端未信任该公钥），发送 RSA 公钥触发设备弹窗
                 if (currentPacket.command == AdbCommand.CMD_AUTH && currentPacket.arg0 == AdbCommand.AUTH_TOKEN) {
                     val pubKeyBytes = keyManager.getAdbPublicKeyBytes()
                     val authPubKeyPacket = AdbPacket.createAuth(AdbCommand.AUTH_RSAPUBLICKEY, pubKeyBytes)
                     socket.writePacket(authPubKeyPacket, skipChecksum = socket.isTls)
 
-                    // 阻塞等待用户在设备弹窗点击授权确认
+                    // 阻塞等待用户在手机弹窗点击确认授权
                     currentPacket = socket.readPacket(AdbCommand.CONNECT_MAXDATA, skipChecksum = socket.isTls)
                 }
             } else {
@@ -159,6 +191,24 @@ public class AdbConnection(
             }
         }
         return currentPacket
+    }
+
+    /**
+     * 统一解析 CMD_CNXN 响应并初始化连接参数与 State
+     */
+    private fun finalizeHandshake(cnxnResponse: AdbPacket): AdbConnectionState.Connected {
+        negotiatedVersion = minOf(cnxnResponse.arg0, AdbCommand.A_VERSION)
+        val peerMaxData = cnxnResponse.arg1
+        if (peerMaxData > 0) {
+            negotiatedMaxPayloadSize = minOf(peerMaxData, AdbCommand.CONNECT_MAXDATA)
+        }
+
+        val banner = String(cnxnResponse.payload, Charsets.UTF_8).trimEnd('\u0000')
+        _features = parseFeatures(banner)
+
+        val connectedState = AdbConnectionState.Connected(banner)
+        _state.value = connectedState
+        return connectedState
     }
 
     private fun startDispatchLoop() {
