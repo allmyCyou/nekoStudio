@@ -20,5 +20,6 @@
     <issue id="SdCardPath">
         <ignore path="**/AppDataFilesProvider.kt" />
         <ignore path="**/AdbSessionService.kt" />
+        <ignore path="**/MainActivity.kt" />
     </issue>
 </lint>
