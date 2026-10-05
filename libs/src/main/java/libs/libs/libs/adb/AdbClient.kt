@@ -10,6 +10,7 @@ import libs.libs.libs.adb.connect.AdbConnectionState
 import libs.libs.libs.adb.key.AdbKeyManager
 import libs.libs.libs.adb.mdns.AdbMdnsManager
 import libs.libs.libs.adb.mdns.AdbMdnsType
+import libs.libs.libs.adb.mdns.AdbMdnsServiceInfo
 import libs.libs.libs.adb.pair.AdbPairingListener
 import libs.libs.libs.adb.pair.AdbPairingManager
 import libs.libs.libs.adb.root.AdbRootClient
