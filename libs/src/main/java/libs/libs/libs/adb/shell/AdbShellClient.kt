@@ -6,30 +6,32 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicReference
 
 public class AdbShellClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
+    // 用于跟踪当前正在运行/活跃的 Shell 流
+    private val activeStreamRef = AtomicReference<AdbStream?>(null)
+    private val streamMutex = Mutex()
 
     /**
      * 执行 Shell 指令（乐观尝试 Shell V2，失败/不支持时自动无缝降级至 V1）
      */
     public suspend fun exec(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
-        // 1. 尝试 Shell V2 执行
         val v2Result = execV2(command)
-        
-        // 2. 仅当 V2 建流失败（不支持 V2 协议）时自动回退到 V1
         if (v2Result.exitCode == -1 && v2Result.stderr.startsWith("Failed to open shell_v2 stream")) {
             return@withContext execV1(command)
         }
-        
         v2Result
     }
 
     /**
-     * 以 Exec (V1) 模式发送命令（使用 sentinel 机制解析 Exit Code）
+     * 以 Exec (V1) 模式发送命令
      */
     public suspend fun execV1(command: String): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
@@ -41,6 +43,9 @@ public class AdbShellClient(
                 exitCode = -1, stdout = "", stderr = "Failed to open exec stream", durationMs = 0L
             )
 
+        // 登记当前活跃流
+        setAndRegisterActiveStream(stream)
+
         val outputStream = ByteArrayOutputStream()
         try {
             while (true) {
@@ -48,6 +53,7 @@ public class AdbShellClient(
                 if (data.isNotEmpty()) outputStream.write(data)
             }
         } finally {
+            clearActiveStream(stream)
             stream.close()
         }
 
@@ -80,6 +86,9 @@ public class AdbShellClient(
                 exitCode = -1, stdout = "", stderr = "Failed to open shell_v2 stream", durationMs = 0L
             )
 
+        // 登记当前活跃流
+        setAndRegisterActiveStream(stream)
+
         val stdoutStream = ByteArrayOutputStream()
         val stderrStream = ByteArrayOutputStream()
         var exitCode = -1
@@ -101,6 +110,7 @@ public class AdbShellClient(
                 exitCode = -1, stdout = "", stderr = "Shell V2 read failed: ${e.message}", durationMs = System.currentTimeMillis() - startTime
             )
         } finally {
+            clearActiveStream(stream)
             stream.close()
         }
 
@@ -113,56 +123,12 @@ public class AdbShellClient(
     }
 
     /**
-     * 读取无损二进制字节数组（优先 Shell V2，降级使用标准 V1 exec 原始流）
-     */
-    public suspend fun execRawBytes(command: String): ByteArray = withContext(Dispatchers.IO) {
-        val v2Stream = connection.openStream("shell,v2,raw:$command")
-        if (v2Stream != null) {
-            val stdoutStream = ByteArrayOutputStream()
-            var v2Executed = false
-            try {
-                readShellV2Stream(v2Stream) { packet ->
-                    when (packet.id) {
-                        ShellV2Packet.ID_STDOUT -> {
-                            v2Executed = true
-                            stdoutStream.write(packet.payload)
-                        }
-                        ShellV2Packet.ID_EXIT -> v2Executed = true
-                    }
-                }
-                if (v2Executed) return@withContext stdoutStream.toByteArray()
-            } catch (_: Exception) {
-                // 建流/解析前失败才进行 V1 降级
-            } finally {
-                v2Stream.close()
-            }
-        }
-
-        val v1Stream = connection.openStream("exec:$command")
-            ?: throw IllegalStateException("Failed to open exec stream for raw bytes")
-
-        val bytesOutput = ByteArrayOutputStream()
-        try {
-            while (true) {
-                val data = v1Stream.read() ?: break
-                if (data.isNotEmpty()) bytesOutput.write(data)
-            }
-        } finally {
-            v1Stream.close()
-        }
-
-        bytesOutput.toByteArray()
-    }
-
-    @Deprecated("Use execRawBytes instead", ReplaceWith("execRawBytes(command)"))
-    public suspend fun execV2RawBytes(command: String): ByteArray = execRawBytes(command)
-
-    /**
-     * 智能流式传输 Flow（不依赖 Feature，优先 V2 建流，建流失败无缝回退 V1）
+     * 智能流式传输 Flow
      */
     public fun execStream(command: String): Flow<ShellStreamChunk> = flow {
         val v2Stream = connection.openStream("shell,v2,raw:$command")
         if (v2Stream != null) {
+            setAndRegisterActiveStream(v2Stream)
             var emittedAny = false
             try {
                 readShellV2Stream(v2Stream) { packet ->
@@ -180,13 +146,15 @@ public class AdbShellClient(
                 }
                 if (emittedAny) return@flow
             } catch (e: Exception) {
-                if (emittedAny) throw e // 已产生输出时中途失败，不允许回退 V1 重新发送
+                if (emittedAny) throw e
             } finally {
+                clearActiveStream(v2Stream)
                 v2Stream.close()
             }
         }
 
         val v1Stream = connection.openStream("exec:$command") ?: return@flow
+        setAndRegisterActiveStream(v1Stream)
         try {
             while (true) {
                 val data = v1Stream.read() ?: break
@@ -195,9 +163,27 @@ public class AdbShellClient(
                 }
             }
         } finally {
+            clearActiveStream(v1Stream)
             v1Stream.close()
         }
     }.flowOn(Dispatchers.IO)
+
+    /**
+     * **主动关闭/退出当前正在运行的 Shell 流**
+     * 可用于提前终止诸如长耗时命令、`logcat` 监听或阻塞中的 Shell 任务。
+     */
+    public suspend fun exit(): Unit = withContext(Dispatchers.IO) {
+        val stream = activeStreamRef.getAndSet(null)
+        stream?.close()
+    }
+
+    private fun setAndRegisterActiveStream(stream: AdbStream) {
+        activeStreamRef.set(stream)
+    }
+
+    private fun clearActiveStream(stream: AdbStream) {
+        activeStreamRef.compareAndSet(stream, null)
+    }
 
     private suspend inline fun readShellV2Stream(
         stream: AdbStream,

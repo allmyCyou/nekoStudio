@@ -270,12 +270,6 @@ public class AdbClient(
         keyManager.ensureLoaded(comment = defaultComment)
     }
 
-    // 提权与重启 API
-
-    public suspend fun getProp(property: String): String {
-        return shell.execV2("getprop $property").stdout.trim()
-    }
-
     /**
      * 请求 adbd 以 root 身份重启
      */
@@ -385,17 +379,5 @@ public class AdbClient(
                 )
             }
         }
-    }
-
-    public suspend fun stat(remotePath: String): FileStatV2 = sync.statV2(remotePath)
-
-    public suspend fun listFiles(remotePath: String): List<FileStatV2> = sync.listV2(remotePath)
-
-    /**
-     * 实时获取 logcat 日志流，自动调度到 IO 线程，并确保上层流取消时正确清理流资源
-     */
-    public fun streamLogcat(args: String = "-v time"): Flow<ShellStreamChunk> {
-        return shell.execStream("logcat $args")
-            .flowOn(Dispatchers.IO)
     }
 }

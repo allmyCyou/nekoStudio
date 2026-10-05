@@ -1090,6 +1090,12 @@ class MainActivity : ComponentActivity() {
                         appendLog(res.stdout.ifEmpty { res.stderr })
                     }
 
+                    "--shell-exit" -> {
+                        appendLog("[info] 已主动关闭 adb Shell 流")
+                        val res = client.shell.exit()
+                        appendLog(res.stdout.ifEmpty { res.stderr })
+                    }
+
                     "root" -> {
                         appendLog("[info] 正在请求 root 权限")
                         val res = client.root()
@@ -1178,30 +1184,6 @@ class MainActivity : ComponentActivity() {
                            .onFailure { appendLog("[error] 文件拉取失败: ${it.message}") }
                     }
 
-                    "stat" -> {
-                        val remotePath = tokens.getOrNull(1)
-                        if (remotePath.isNullOrBlank()) {
-                            appendLog("[error] 请指定远程文件路径，例: adb stat /sdcard/Download")
-                            return@launch
-                        }
-                        val statInfo = client.stat(remotePath)
-                        appendLog("[success] Stat 信息: mode=${statInfo.mode}, size=${statInfo.size}, mtime=${statInfo.mtime}, error=${statInfo.error}")
-                    }
-
-                    "sync-ls", "ls" -> {
-                        val remotePath = tokens.getOrNull(1) ?: "/sdcard"
-                        appendLog("[info] 正在获取 Sync 目录列表: $remotePath")
-                        val fileList = client.listFiles(remotePath)
-                        if (fileList.isEmpty()) {
-                            appendLog("[info] 目录为空或无法访问")
-                        } else {
-                            appendLog("[success] 共 ${fileList.size} 项文件/子目录:")
-                            fileList.forEach { item ->
-                                appendLog("  ${item.path.ifEmpty { remotePath }} [size=${item.size}, mode=${item.mode}]")
-                            }
-                        }
-                    }
-
                     // 应用安装 (支持 .apk 和 .apks) (adb install)
                     "install" -> {
                         val path = adbCmd.removePrefix("install").trim()
@@ -1261,21 +1243,6 @@ class MainActivity : ComponentActivity() {
 
                         res.onSuccess { appendLog("[success] 卸载成功") }
                            .onFailure { appendLog("[error] 卸载失败: ${it.message ?: "未知错误"}") }
-                    }
-
-                    "logcat" -> {
-                        val args = adbCmd.removePrefix("logcat").trim().ifEmpty { "-v time" }
-                        appendLog("[info] 开始监听 logcat ($args) [持续监听 5 秒]:")
-
-                        withTimeoutOrNull(5000L) {
-                            client.streamLogcat(args).collect { chunk ->
-                                val text = String(chunk.data, Charsets.UTF_8).trim()
-                                if (text.isNotEmpty()) {
-                                    appendLog(text)
-                                }
-                            }
-                        }
-                        appendLog("[info] logcat 监听超时/结束")
                     }
 
                     "disconnect" -> {
