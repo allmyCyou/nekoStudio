@@ -54,7 +54,7 @@ public class AdbConnection(
     public suspend fun connect(
         host: String,
         port: Int = 5555,
-        systemIdentity: String = "host::;",
+        systemIdentity: String = "host::nekoStudio@adbClient;",
         timeoutMs: Long = 10000L,
         directTls: Boolean = false // 是否强行使用 Direct TLS 模式
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
