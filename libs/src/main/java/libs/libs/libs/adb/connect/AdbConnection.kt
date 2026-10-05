@@ -49,21 +49,25 @@ public class AdbConnection(
     public fun hasFeature(feature: String): Boolean = _features.contains(feature)
 
     public val isSkipChecksum: Boolean 
-        get() = true // TLS 链路上默认跳过 CRC32 校验
+        get() = socket.isTls // 仅在 TLS 建立后跳过 CRC32 校验
 
     public suspend fun connect(
         host: String,
         port: Int = 5555,
         systemIdentity: String = "host::;",
-        timeoutMs: Long = 10000L
+        timeoutMs: Long = 10000L,
+        directTls: Boolean = false // 是否强行使用 Direct TLS 模式
     ): AdbConnectionState.Connected = withContext(Dispatchers.IO) {
         try {
             isCleanedUp.set(false)
             _state.value = AdbConnectionState.Connecting
 
             val connectedState: AdbConnectionState.Connected = withTimeout(timeoutMs) {
-                // 直接建立 TLS 加密 Socket 连接
-                socket.connect(host, port, keyManager, timeoutMs.toInt())
+                if (directTls) {
+                    socket.connectTls(host, port, keyManager, timeoutMs.toInt())
+                } else {
+                    socket.connectRaw(host, port, timeoutMs.toInt())
+                }
 
                 val systemBanner = "$systemIdentity\u0000".toByteArray(Charsets.UTF_8)
                 val cnxnPacket = AdbPacket(
@@ -72,12 +76,32 @@ public class AdbConnection(
                     arg1 = AdbCommand.MAX_PAYLOAD,
                     payload = systemBanner
                 )
-                sendPacket(cnxnPacket)
+                
+                // 发送 CONNECT 报文
+                socket.writePacket(cnxnPacket, skipChecksum = socket.isTls)
 
-                // TLS 链路上直接等待对端响应 CNXN 报文
-                val response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
+                var response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
+
+                // 借鉴 kadb 核心逻辑：拦截并响应 CMD_STLS (StartTLS 升级)
+                if (response.command == AdbCommand.CMD_STLS) {
+                    // 1. 发送 STLS 确认报文 (固定 A_STLS_VERSION = 0x01)
+                    val stlsAck = AdbPacket(
+                        command = AdbCommand.CMD_STLS,
+                        arg0 = 1, // AdbProtocol.A_STLS_VERSION
+                        arg1 = 0,
+                        payload = ByteArray(0)
+                    )
+                    socket.writePacket(stlsAck, skipChecksum = false)
+
+                    // 2. 将 Socket 动态升级为 TLS Socket
+                    socket.upgradeToTls(keyManager, timeoutMs.toInt())
+
+                    // 3. TLS 升级完成后，重新读取加密通道后的真实 CMD_CNXN 响应
+                    response = socket.readPacket(AdbCommand.CONNECT_MAXDATA)
+                }
+
                 if (response.command != AdbCommand.CMD_CNXN) {
-                    throw IllegalStateException("Unexpected packet during TLS handshake: 0x${Integer.toHexString(response.command)}")
+                    throw IllegalStateException("Unexpected packet during handshake: 0x${Integer.toHexString(response.command)}")
                 }
 
                 negotiatedVersion = minOf(response.arg0, AdbCommand.A_VERSION)
@@ -118,7 +142,6 @@ public class AdbConnection(
 
                     val targetLocalId = packet.arg1
 
-                    // 1. 优先路由给已激活的 Stream
                     val stream = activeStreams[targetLocalId]
                     if (stream != null) {
                         when (packet.command) {
@@ -132,14 +155,12 @@ public class AdbConnection(
                         continue
                     }
 
-                    // 2. 路由给正在等待 OPEN 响应的 Request
                     val pendingChannel = pendingOpenRequests[targetLocalId]
                     if (pendingChannel != null) {
                         pendingChannel.trySend(packet)
                         continue
                     }
 
-                    // 3. 未注册 Stream 的离群响应清理
                     if (packet.command == AdbCommand.CMD_WRTE) {
                         val closePacket = AdbPacket(
                             command = AdbCommand.CMD_CLSE,
@@ -212,8 +233,6 @@ public class AdbConnection(
                     initialAvailableSendBytes = initialTxCredit
                 )
 
-                // 关键修复：务必在移除 pendingOpenRequests 之前将 stream 写入 activeStreams！
-                // 防止 dispatchLoop 在高并发下读到后续的 CMD_WRTE 时 activeStreams 为空而给对端误发 CMD_CLSE。
                 activeStreams[localId] = stream
                 return@withContext stream
             } else {

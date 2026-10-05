@@ -10,21 +10,43 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetSocketAddress
+import java.net.Socket
 
 public class AdbSocket {
 
+    private var rawSocket: Socket? = null
     private var tlsSocket: AdbTlsSocket? = null
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
 
     private val writeMutex = Mutex()
 
-    public val isTls: Boolean get() = true
+    public val isTls: Boolean get() = tlsSocket != null
 
     /**
-     * 直接建立原生 TLS 加密 Socket 连接
+     * 连接原始 TCP Socket（用于 StartTLS 模式）
      */
-    public suspend fun connect(
+    public suspend fun connectRaw(
+        host: String,
+        port: Int,
+        timeoutMs: Int = 10000
+    ) = withContext(Dispatchers.IO) {
+        close()
+        val socket = Socket()
+        socket.tcpNoDelay = true
+        socket.keepAlive = true
+        socket.connect(InetSocketAddress(host, port), timeoutMs)
+        
+        this@AdbSocket.rawSocket = socket
+        this@AdbSocket.inputStream = socket.getInputStream()
+        this@AdbSocket.outputStream = socket.getOutputStream()
+    }
+
+    /**
+     * 直接建立原生 TLS 加密 Socket 连接（Direct TLS 模式）
+     */
+    public suspend fun connectTls(
         host: String,
         port: Int,
         keyManager: AdbKeyManager,
@@ -32,6 +54,21 @@ public class AdbSocket {
     ) = withContext(Dispatchers.IO) {
         close()
         val tls = AdbTlsSocket.connect(keyManager, host, port, timeoutMs)
+        this@AdbSocket.tlsSocket = tls
+        this@AdbSocket.inputStream = tls.inputStream
+        this@AdbSocket.outputStream = tls.outputStream
+    }
+
+    /**
+     * 将当前的 Raw Socket 原地升级为 TLS Socket (StartTLS)
+     */
+    public suspend fun upgradeToTls(
+        keyManager: AdbKeyManager,
+        timeoutMs: Int = 10000
+    ) = withContext(Dispatchers.IO) {
+        val socket = rawSocket ?: throw IllegalStateException("Raw socket is not connected")
+        val tls = AdbTlsSocket.startTls(socket, keyManager, autoClose = true, handshakeTimeoutMs = timeoutMs)
+        
         this@AdbSocket.tlsSocket = tls
         this@AdbSocket.inputStream = tls.inputStream
         this@AdbSocket.outputStream = tls.outputStream
@@ -49,9 +86,6 @@ public class AdbSocket {
         }
     }
 
-    /**
-     * 读取并解析 AdbPacket，对 Header Magic 与 Payload 上限进行校验
-     */
     public suspend fun readPacket(maxPayloadCap: Int = AdbCommand.CONNECT_MAXDATA): AdbPacket = withContext(Dispatchers.IO) {
         val headerBytes = ByteArray(AdbPacket.HEADER_SIZE)
         readExactly(headerBytes, AdbPacket.HEADER_SIZE)
@@ -76,9 +110,6 @@ public class AdbSocket {
         )
     }
 
-    /**
-     * 线程/协程安全地发送 AdbPacket 数据包
-     */
     public suspend fun writePacket(packet: AdbPacket, skipChecksum: Boolean = true) = withContext(Dispatchers.IO) {
         val stream = outputStream ?: throw IllegalStateException("Socket is not connected")
         val bytes = packet.toByteArray(skipChecksum = skipChecksum)
@@ -94,14 +125,16 @@ public class AdbSocket {
             inputStream?.close()
             outputStream?.close()
             tlsSocket?.close()
+            rawSocket?.close()
         } catch (_: Exception) {
         } finally {
             inputStream = null
             outputStream = null
             tlsSocket = null
+            rawSocket = null
         }
     }
 
     public val isConnected: Boolean
-        get() = tlsSocket?.isConnected == true
+        get() = (tlsSocket?.isConnected == true) || (rawSocket?.isConnected == true && rawSocket?.isClosed == false)
 }

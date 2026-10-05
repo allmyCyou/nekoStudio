@@ -71,17 +71,24 @@ public data class AdbPacket(
 
         // --- 常用建包便捷工厂方法 ---
 
+        /**
+         * 创建 CNXN (Connect) 握手数据包
+         */
         public fun createCnxn(
             version: Int = AdbCommand.A_VERSION,
-            maxPayload: Int = AdbCommand.MAX_PAYLOAD,
-            systemIdentity: String = "host::\u0000"
+            maxPayload: Int = AdbCommand.CONNECT_MAXDATA,
+            features: List<String> = AdbCommand.DEFAULT_FEATURES,
+            systemIdentity: String = "host::"
         ): AdbPacket = AdbPacket(
             command = AdbCommand.CMD_CNXN,
             arg0 = version,
             arg1 = maxPayload,
-            payload = systemIdentity.toByteArray(Charsets.UTF_8)
+            payload = AdbCommand.buildConnectPayload(features, systemIdentity)
         )
 
+        /**
+         * 创建 AUTH 鉴权数据包
+         */
         public fun createAuth(authType: Int, keyOrSignature: ByteArray): AdbPacket = AdbPacket(
             command = AdbCommand.CMD_AUTH,
             arg0 = authType,
@@ -89,24 +96,60 @@ public data class AdbPacket(
             payload = keyOrSignature
         )
 
-        public fun createOpen(localId: Int, destination: String): AdbPacket {
+        /**
+         * 创建 STLS (StartTLS) 协议握手或响应数据包
+         */
+        public fun createStls(version: Int = AdbCommand.A_STLS_VERSION): AdbPacket = AdbPacket(
+            command = AdbCommand.CMD_STLS,
+            arg0 = version,
+            arg1 = 0,
+            payload = ByteArray(0)
+        )
+
+        /**
+         * 创建 OPEN 流开启数据包 (支持 delayed_ack 初始 rxWindow 参数)
+         */
+        public fun createOpen(
+            localId: Int,
+            destination: String,
+            initialRxWindow: Int = 0
+        ): AdbPacket {
             val destBytes = destination.toByteArray(Charsets.UTF_8)
             // ADB OPEN 指令的 destination payload 必须以 \0 结尾
             val payload = if (destBytes.lastOrNull() == 0.toByte()) destBytes else destBytes + 0.toByte()
             return AdbPacket(
                 command = AdbCommand.CMD_OPEN,
                 arg0 = localId,
-                arg1 = 0,
+                arg1 = initialRxWindow,
                 payload = payload
             )
         }
 
-        public fun createOkay(localId: Int, remoteId: Int): AdbPacket = AdbPacket(
+        /**
+         * 创建 OKAY 确认数据包 (可携带 delayed_ack 的 ackBytes 额外配额)
+         */
+        public fun createOkay(localId: Int, remoteId: Int, ackBytes: Int = 0): AdbPacket = AdbPacket(
             command = AdbCommand.CMD_OKAY,
             arg0 = localId,
-            arg1 = remoteId
+            arg1 = remoteId,
+            payload = if (ackBytes > 0) {
+                ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(ackBytes).array()
+            } else ByteArray(0)
         )
 
+        /**
+         * 创建 WRTE 数据传输包
+         */
+        public fun createWrite(localId: Int, remoteId: Int, data: ByteArray): AdbPacket = AdbPacket(
+            command = AdbCommand.CMD_WRTE,
+            arg0 = localId,
+            arg1 = remoteId,
+            payload = data
+        )
+
+        /**
+         * 创建 CLSE 关闭流数据包
+         */
         public fun createClose(localId: Int, remoteId: Int): AdbPacket = AdbPacket(
             command = AdbCommand.CMD_CLSE,
             arg0 = localId,
@@ -125,7 +168,7 @@ public data class AdbPacket(
         /**
          * 校验 Header 合法性（必须满足 magic 匹配且 payload 长度在安全范围内）
          */
-        val isValid: Boolean get() = (command.inv() == magic) && (dataLength in 0..AdbCommand.MAX_PAYLOAD)
+        val isValid: Boolean get() = (command.inv() == magic) && (dataLength in 0..AdbCommand.CONNECT_MAXDATA)
 
         /**
          * 校验接收到的 Payload Checksum 是否正确

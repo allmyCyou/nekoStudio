@@ -9,7 +9,7 @@ public sealed class AdbTlsException(message: String, cause: Throwable? = null) :
     /** 握手失败：通常是设备拒绝证书或未建立 TLS 配对授权 */
     public class HandshakeFailed(message: String, cause: Throwable) : AdbTlsException(message, cause)
     
-    /** 对端证书无法验证 */
+    /** 设备拒绝授权或未完成无线调试配对 */
     public class PeerUnverified(message: String, cause: Throwable) : AdbTlsException(message, cause)
     
     /** TLS 协议级别错误 */
