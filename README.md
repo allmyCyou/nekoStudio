@@ -9,24 +9,36 @@
 ## Mode
 - [x] ROOT
 - [x] Shell
-- [ ] adb
+- [x] adb
   - [x] pair
   - [x] connect
-  - [ ] disconnect
-  - [ ] shell
-  - [ ] root
-  - [ ] unroot
-  - [ ] install
-  - [ ] uninstall
-  - [ ] push
-  - [ ] pull
-  - [ ] reboot
-  - [ ] usb
+  - [x] disconnect
+  - [x] shell
+  - [x] root
+  - [x] unroot
+  - [x] install
+  - [x] uninstall
+  - [x] push
+  - [x] pull
+  - [x] reboot
+  - [x] usb
+  - [x] mdns
+  - [x] abb
   - [ ] sideload
 - [x] fastboot
-- [x] fastbootd
-- [ ] adb sideload
+  - [x] fastbootd
+    - [x] flash
+    - [x] boot
+    - [x] getvar
+    - [x] oem
+    - [x] reboot
+    - [x] erase
+    - [x] format
+    - [x] set active
 - [x] 900e
+  - [x] usb
+    - [x] maxPower
+    - [x] isSelfPowered
 - [ ] 9008
 - [ ] MTK Preloader
 - [ ] MTK BROM

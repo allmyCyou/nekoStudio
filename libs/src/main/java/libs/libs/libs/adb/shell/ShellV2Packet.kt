@@ -21,9 +21,6 @@ public data class ShellV2Packet(
 
         public const val HEADER_SIZE: Int = 5
 
-        /**
-         * 构建 Shell V2 发送帧（如向远程输入 stdin 数据或关闭 stdin）
-         */
         public fun createFrame(id: Int, payload: ByteArray = ByteArray(0)): ByteArray {
             val buf = ByteBuffer.allocate(HEADER_SIZE + payload.size).order(ByteOrder.LITTLE_ENDIAN)
             buf.put(id.toByte())
