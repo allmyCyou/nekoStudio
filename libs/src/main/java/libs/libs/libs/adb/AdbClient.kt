@@ -5,6 +5,7 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import libs.libs.libs.adb.abb.AdbAbbClient
 import libs.libs.libs.adb.abb.AbbInstallOptions
+import libs.libs.libs.adb.abb.AbbUninstallOptions
 import libs.libs.libs.adb.connect.AdbConnection
 import libs.libs.libs.adb.connect.AdbConnectionState
 import libs.libs.libs.adb.key.AdbKeyManager
@@ -177,7 +178,7 @@ public class AdbClient(
     public suspend fun mdnsConnect(
         context: Context,
         deviceName: String? = null,
-        systemIdentity: String = "host::nekoStudio@adbClient;",
+        systemIdentity: String = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,devraw,app_info,server_status,delayed_ack;",
         mdnsTimeoutMs: Long = 10000L,
         connectTimeoutMs: Long = 10000L
     ): Result<AdbConnectionState.Connected> = mdnsConnect(
@@ -194,7 +195,7 @@ public class AdbClient(
     public suspend fun mdnsConnect(
         mdnsManager: AdbMdnsManager,
         deviceName: String? = null,
-        systemIdentity: String = "host::nekoStudio@adbClient;",
+        systemIdentity: String = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns,devicetracker_proto_format,devraw,app_info,server_status,delayed_ack;",
         mdnsTimeoutMs: Long = 10000L,
         connectTimeoutMs: Long = 10000L
     ): Result<AdbConnectionState.Connected> = runCatching {
@@ -304,7 +305,7 @@ public class AdbClient(
         }.getOrDefault(true) // 设备执行 reboot 后网络会立即切断，抛出异常通常代表命令已成功投递
     }
 
-    // 应用安装与传输 API
+    // 应用安装与卸载 API
 
     public suspend fun installApk(
         apkFile: File,
@@ -330,6 +331,14 @@ public class AdbClient(
         options: AbbInstallOptions = AbbInstallOptions(),
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = abb.installSplitApks(apks, options, onProgress)
+
+    /**
+     * 卸载指定的应用包
+     */
+    public suspend fun uninstall(
+        packageName: String,
+        options: AbbUninstallOptions = AbbUninstallOptions()
+    ): Result<Unit> = abb.uninstall(packageName, options)
 
     // 文件传输 API
 

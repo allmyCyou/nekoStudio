@@ -109,6 +109,8 @@ import com.adb.kitty.data.fastboot.*
 import com.adb.kitty.service.*
 import com.adb.kitty.R
 
+import libs.libs.libs.adb.abb.AbbUninstallOptions
+
 @Keep
 class MainActivity : ComponentActivity() {
     companion object {
@@ -1088,17 +1090,192 @@ class MainActivity : ComponentActivity() {
                         appendLog(res.stdout.ifEmpty { res.stderr })
                     }
 
+                    "root" -> {
+                        appendLog("[info] 正在请求 root 权限")
+                        val res = client.root()
+                        appendLog(res.stdout.ifEmpty { res.stderr })
+                    }
+
+                    "unroot" -> {
+                        appendLog("[info] 正在恢复普通权限")
+                        val res = client.unroot()
+                        appendLog(res.stdout.ifEmpty { res.stderr })
+                    }
+
+                    "reboot" -> {
+                        val target = tokens.getOrNull(1) ?: ""
+                        appendLog("[info] 正在重启设备 ${if (target.isNotEmpty()) "($target)" else ""}...")
+                        val success = client.reboot(target)
+                        if (success) {
+                            appendLog("[success] 重启命令已投递")
+                        } else {
+                            appendLog("[error] 重启命令发送失败")
+                        }
+                    }
+
+                    "features" -> {
+                        val features = client.features
+                        appendLog("[info] 当前设备支持的 ADB Features (${features.size} 项):")
+                        appendLog(features.joinToString(", "))
+                    }
+
+                    "status" -> {
+                        val currState = client.state.value
+                        appendLog("[info] 当前 Connection 状态: $currState")
+                    }
+
+                    "push" -> {
+                        val localPath = tokens.getOrNull(1)
+                        val remotePath = tokens.getOrNull(2)
+                        if (localPath.isNullOrBlank() || remotePath.isNullOrBlank()) {
+                            appendLog("[error] 参数错误，用法: adb push <本地文件路径> <远程路径>")
+                            return@launch
+                        }
+                        val localFile = File(localPath)
+                        if (!localFile.exists()) {
+                            appendLog("[error] 本地文件不存在: $localPath")
+                            return@launch
+                        }
+
+                        appendLog("[info] 正在推送到 $remotePath ...")
+                        var lastProgress = -1
+                        val res = client.pushFile(localFile, remotePath) { written, total ->
+                            if (total > 0) {
+                                val percent = ((written * 100) / total).toInt()
+                                if (percent % 25 == 0 && percent != lastProgress) {
+                                    lastProgress = percent
+                                    appendLog("[info] 推送进度: $percent% ($written/$total B)")
+                                }
+                            }
+                        }
+
+                        res.onSuccess { appendLog("[success] 文件推送成功") }
+                           .onFailure { appendLog("[error] 文件推送失败: ${it.message}") }
+                    }
+
+                    "pull" -> {
+                        val remotePath = tokens.getOrNull(1)
+                        val localPath = tokens.getOrNull(2)
+                        if (remotePath.isNullOrBlank() || localPath.isNullOrBlank()) {
+                            appendLog("[error] 参数错误，用法: adb pull <远程路径> <本地文件路径>")
+                            return@launch
+                        }
+                        val localFile = File(localPath)
+
+                        appendLog("[info] 正在拉取 $remotePath 到 $localPath ...")
+                        var lastProgress = -1
+                        val res = client.pullFile(remotePath, localFile) { read, total ->
+                            if (total > 0) {
+                                val percent = ((read * 100) / total).toInt()
+                                if (percent % 25 == 0 && percent != lastProgress) {
+                                    lastProgress = percent
+                                    appendLog("[info] 拉取进度: $percent% ($read/$total B)")
+                                }
+                            }
+                        }
+
+                        res.onSuccess { appendLog("[success] 文件拉取成功") }
+                           .onFailure { appendLog("[error] 文件拉取失败: ${it.message}") }
+                    }
+
+                    "stat" -> {
+                        val remotePath = tokens.getOrNull(1)
+                        if (remotePath.isNullOrBlank()) {
+                            appendLog("[error] 请指定远程文件路径，例: adb stat /sdcard/Download")
+                            return@launch
+                        }
+                        val statInfo = client.stat(remotePath)
+                        appendLog("[success] Stat 信息: mode=${statInfo.mode}, size=${statInfo.size}, mtime=${statInfo.mtime}, error=${statInfo.error}")
+                    }
+
+                    "sync-ls", "ls" -> {
+                        val remotePath = tokens.getOrNull(1) ?: "/sdcard"
+                        appendLog("[info] 正在获取 Sync 目录列表: $remotePath")
+                        val fileList = client.listFiles(remotePath)
+                        if (fileList.isEmpty()) {
+                            appendLog("[info] 目录为空或无法访问")
+                        } else {
+                            appendLog("[success] 共 ${fileList.size} 项文件/子目录:")
+                            fileList.forEach { item ->
+                                appendLog("  ${item.name.ifEmpty { remotePath }} [size=${item.size}, mode=${item.mode}]")
+                            }
+                        }
+                    }
+
+                    // 应用安装 (支持 .apk 和 .apks) (adb install)
                     "install" -> {
                         val path = adbCmd.removePrefix("install").trim()
                         val apkFile = File(path)
                         if (!apkFile.exists()) {
-                            appendLog("[error] APK 文件不存在: $path")
+                            appendLog("[error] 文件不存在: $path")
                             return@launch
                         }
+
                         appendLog("[info] 正在安装 $path ...")
-                        val res = client.installApk(apkFile)
+                        var lastProgress = -1
+                        val onProgress: (Long, Long) -> Unit = { written, total ->
+                            if (total > 0) {
+                                val percent = ((written * 100) / total).toInt()
+                                if (percent % 25 == 0 && percent != lastProgress) {
+                                    lastProgress = percent
+                                    appendLog("[info] 安装传输进度: $percent%")
+                                }
+                            }
+                        }
+
+                        // 根据扩展名自动判别是单 APK 还是 APKS 集合
+                        val res = if (apkFile.name.endsWith(".apks", ignoreCase = true)) {
+                            client.installApks(apkFile, onProgress = onProgress)
+                        } else {
+                            client.installApk(apkFile, onProgress = onProgress)
+                        }
+
                         res.onSuccess { appendLog("[success] 安装成功") }
                            .onFailure { appendLog("[error] 安装失败: ${it.message}") }
+                    }
+
+                    // 应用卸载 (adb uninstall [-k] <packageName>)
+                    "uninstall" -> {
+                        var keepData = false
+                        var packageName: String? = null
+
+                        var i = 1
+                        while (i < tokens.size) {
+                            val token = tokens[i]
+                            if (token == "-k") {
+                                keepData = true
+                            } else if (!token.startsWith("-")) {
+                                packageName = token
+                            }
+                            i++
+                        }
+
+                        if (packageName.isNullOrBlank()) {
+                            appendLog("[error] 请指定应用包名，用法: adb uninstall [-k] <包名>")
+                            return@launch
+                        }
+
+                        appendLog("[info] 正在卸载 $packageName ${if (keepData) "(保留数据与缓存)" else ""}...")
+                        val options = AbbUninstallOptions(keepData = keepData)
+                        val res = client.uninstall(packageName, options)
+
+                        res.onSuccess { appendLog("[success] 卸载成功") }
+                           .onFailure { appendLog("[error] 卸载失败: ${it.message ?: "未知错误"}") }
+                    }
+
+                    "logcat" -> {
+                        val args = adbCmd.removePrefix("logcat").trim().ifEmpty { "-v time" }
+                        appendLog("[info] 开始监听 logcat ($args) [持续监听 5 秒]:")
+
+                        withTimeoutOrNull(5000L) {
+                            client.streamLogcat(args).collect { chunk ->
+                                val text = String(chunk.data, Charsets.UTF_8).trim()
+                                if (text.isNotEmpty()) {
+                                    appendLog(text)
+                                }
+                            }
+                        }
+                        appendLog("[info] logcat 监听超时/结束")
                     }
 
                     "disconnect" -> {
