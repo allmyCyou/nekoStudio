@@ -1020,7 +1020,7 @@ class MainActivity : ComponentActivity() {
 
                     "mdns" -> {
                         val flag = tokens.getOrNull(1)?.lowercase()
-                        val context = this
+                        val context = this@MainActivity
 
                         when (flag) {
                             "-l", "--list" -> {
