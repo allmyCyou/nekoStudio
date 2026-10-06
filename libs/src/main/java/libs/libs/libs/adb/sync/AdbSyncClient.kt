@@ -9,13 +9,13 @@ import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/**
- * ADB Sync V1 协议客户端
- * 纯粹处理协议 V1 指令: STAT, LIST (DENT), SEND, RECV
- */
 public open class AdbSyncClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
+    // 保证 Header(8B) + ChunkPayload <= 64KB (ADB 单包 MAX_PAYLOAD)
+    public companion object {
+        public const val MAX_SYNC_DATA_SIZE: Int = 64 * 1024 - SyncCommand.HEADER_SIZE // 65,528 字节
+    }
 
     protected suspend fun openSyncStream(): AdbStream {
         return connection.openStream("sync:")
@@ -28,14 +28,10 @@ public open class AdbSyncClient(
     }
 
     protected fun sanitizeMtime(mtime: Long): Int {
-        // 如果误传了毫秒时间戳 (大于 10 位数)，自动转换为秒级
         val seconds = if (mtime > 9_999_999_999L) mtime / 1000 else mtime
         return seconds.toInt()
     }
 
-    /**
-     * V1 Stat (STAT)
-     */
     public suspend fun stat(remotePath: String): FileStat = withContext(Dispatchers.IO) {
         val (stream, reader) = openSyncReader()
         try {
@@ -62,9 +58,6 @@ public open class AdbSyncClient(
         }
     }
 
-    /**
-     * V1 Directory List (LIST / DENT)
-     */
     public suspend fun list(remotePath: String): List<DirectoryEntry> = withContext(Dispatchers.IO) {
         val (stream, reader) = openSyncReader()
         val entries = mutableListOf<DirectoryEntry>()
@@ -121,7 +114,7 @@ public open class AdbSyncClient(
             val destBytes = destinationStr.toByteArray(Charsets.UTF_8)
             stream.write(SyncCommand.createHeader(SyncCommand.ID_SEND, destBytes.size) + destBytes)
 
-            val buffer = ByteArray(64 * 1024)
+            val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
             var bytesWritten = 0L
             var read: Int
 
@@ -130,6 +123,7 @@ public open class AdbSyncClient(
                     val dataHeader = SyncCommand.createHeader(SyncCommand.ID_DATA, read)
                     val payload = if (read == buffer.size) buffer else buffer.copyOf(read)
 
+                    // 写入数据帧
                     stream.write(dataHeader + payload)
                     bytesWritten += read
                     onProgress?.invoke(bytesWritten, totalSize)

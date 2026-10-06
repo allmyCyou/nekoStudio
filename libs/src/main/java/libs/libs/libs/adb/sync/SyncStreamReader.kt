@@ -1,6 +1,7 @@
 package libs.libs.libs.adb.sync
 
 import libs.libs.libs.adb.connect.AdbStream
+import kotlinx.coroutines.yield
 
 /**
  * 带有字节缓冲功能的 Sync 流读取器
@@ -34,6 +35,9 @@ public class SyncStreamReader(private val stream: AdbStream) {
                 if (chunk.isNotEmpty()) {
                     currentBuffer = chunk
                     bufferOffset = 0
+                } else {
+                    // 规避非阻塞 Socket 返回空 ByteArray(0) 导致 CPU 死循环
+                    yield()
                 }
             }
         }
