@@ -15,12 +15,11 @@ public class AdbSyncClientV2(
     private var isV2SupportedCache: Boolean? = null
 
     /**
-     * 检查当前连接是否支持 Sync V2 协议
+     * 检查设备连接是否支持 Sync V2 协议
      */
     public suspend fun isV2Supported(): Boolean {
         isV2SupportedCache?.let { return it }
         val supported = try {
-            // 使用根目录探针测试 STA2
             val (stream, reader) = openSyncReader()
             try {
                 val requestBytes = SyncCommandV2.createRequestV2(
@@ -65,7 +64,7 @@ public class AdbSyncClientV2(
                         .parseSyncStatV2(remotePath)
                 }
             } catch (_: Exception) {
-                // 失败则 Fallback
+                // 异常自动 Fallback
             } finally {
                 stream.close()
             }
@@ -101,7 +100,7 @@ public class AdbSyncClientV2(
                             val nameBytes = reader.readExactBytes(nameLen)
                             val fileName = String(nameBytes, Charsets.UTF_8)
 
-                            if (fileName != "." && fileName != "..") {
+                            if (fileName != "." && fileName != ".." && !fileName.contains("/") && !fileName.contains("\\")) {
                                 val fullPath = if (remotePath.endsWith("/")) "$remotePath$fileName" else "$remotePath/$fileName"
                                 val fileStat = ByteBuffer.wrap(statBytes)
                                     .order(ByteOrder.LITTLE_ENDIAN)
@@ -124,7 +123,7 @@ public class AdbSyncClientV2(
             }
         }
 
-        // Fallback 到 V1
+        // Fallback 到 V1 List 并格式化为 V2
         val v1Entries = list(remotePath)
         v1Entries.map { dent ->
             FileStatV2(
@@ -147,7 +146,6 @@ public class AdbSyncClientV2(
         mtime: Long = System.currentTimeMillis() / 1000,
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
-        // 先判断设备是否真正支持 Sync V2 且无压缩 Feature Flag，避免盲目发送 SND2 导致 Socket 爆满
         if (flags == SyncFlags.FLAG_NONE && isV2Supported()) {
             var v2Success = false
             val (stream, reader) = openSyncReader()
@@ -185,7 +183,7 @@ public class AdbSyncClientV2(
             } catch (e: IllegalStateException) {
                 throw e
             } catch (_: Exception) {
-                // 网络/协议报错则降级到 V1
+                // 传输降级
             } finally {
                 stream.close()
             }
@@ -193,7 +191,6 @@ public class AdbSyncClientV2(
             if (v2Success) return@withContext
         }
 
-        // 降级回退到 V1 Push
         push(inputStream, remotePath, totalSize, mode, mtime, onProgress)
     }
 
@@ -225,8 +222,7 @@ public class AdbSyncClientV2(
                         when (id) {
                             SyncCommand.ID_DATA -> {
                                 isV2Valid = true
-                                val chunk = reader.readExactBytes(len)
-                                outputStream.write(chunk)
+                                reader.readToStream(outputStream, len)
                                 bytesRead += len
                                 onProgress?.invoke(bytesRead, fileStat.size)
                             }
@@ -253,7 +249,6 @@ public class AdbSyncClientV2(
             if (v2Success) return@withContext
         }
 
-        // 降级回退到 V1 Pull
         pull(remotePath, outputStream, onProgress)
     }
 }

@@ -6,6 +6,7 @@ public data class DirectoryEntry(
     val size: Long,
     val mtime: Long
 ) {
-    val isDirectory: Boolean get() = (mode and FilePermissions.S_IFDIR) != 0
-    val isFile: Boolean get() = (mode and FilePermissions.S_IFREG) != 0
+    val isDirectory: Boolean get() = (mode and FilePermissions.S_IFMT) == FilePermissions.S_IFDIR
+    val isFile: Boolean get() = (mode and FilePermissions.S_IFMT) == FilePermissions.S_IFREG
+    val isSymbolicLink: Boolean get() = (mode and FilePermissions.S_IFMT) == FilePermissions.S_IFLNK
 }

@@ -11,15 +11,6 @@ public object SyncCommandV2 {
     public const val ID_SND2: String = "SND2"
     public const val ID_RCV2: String = "RCV2"
 
-    /**
-     * 创建 ADB Sync V2 报文请求
-     * 标准 V2 结构 (共 16 字节 Header + 路径):
-     * [0..3]   ID (4 Bytes, 如 "SND2", "RCV2", "STA2", "LST2")
-     * [4..7]   mode (4 Bytes, Little-Endian)
-     * [8..11]  flags (4 Bytes, Little-Endian)
-     * [12..15] path_len (4 Bytes, Little-Endian)
-     * [16..]   path (N Bytes, UTF-8)
-     */
     public fun createRequestV2(
         id: String,
         mode: Int,

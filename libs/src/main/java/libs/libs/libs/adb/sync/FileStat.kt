@@ -7,8 +7,9 @@ public data class FileStat(
     val mtime: Long
 ) {
     val exists: Boolean get() = mode != 0
-    val isDirectory: Boolean get() = (mode and FilePermissions.S_IFDIR) != 0
-    val isFile: Boolean get() = (mode and FilePermissions.S_IFREG) != 0
+    val isDirectory: Boolean get() = (mode and FilePermissions.S_IFMT) == FilePermissions.S_IFDIR
+    val isFile: Boolean get() = (mode and FilePermissions.S_IFMT) == FilePermissions.S_IFREG
+    val isSymbolicLink: Boolean get() = (mode and FilePermissions.S_IFMT) == FilePermissions.S_IFLNK
 
     public fun toFileStatV2(): FileStatV2 = FileStatV2(
         path = path,

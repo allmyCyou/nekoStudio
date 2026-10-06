@@ -12,7 +12,6 @@ import java.nio.ByteOrder
 public open class AdbSyncClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
-    // 保证 Header(8B) + ChunkPayload <= 64KB (ADB 单包 MAX_PAYLOAD)
     public companion object {
         public const val MAX_SYNC_DATA_SIZE: Int = 64 * 1024 - SyncCommand.HEADER_SIZE // 65,528 字节
     }
@@ -82,7 +81,8 @@ public open class AdbSyncClient(
                         val nameBytes = reader.readExactBytes(nameLen)
                         val name = String(nameBytes, Charsets.UTF_8)
 
-                        if (name != "." && name != "..") {
+                        // 路径穿越校验（遵循 AOSP 规范）
+                        if (name != "." && name != ".." && !name.contains("/") && !name.contains("\\")) {
                             entries.add(DirectoryEntry(name, mode, size, mtime))
                         }
                     }
@@ -98,7 +98,7 @@ public open class AdbSyncClient(
     }
 
     /**
-     * V1 Push (SEND)
+     * V1 Push (SEND) - 带小文件打包合并优化
      */
     public suspend fun push(
         inputStream: InputStream,
@@ -112,26 +112,65 @@ public open class AdbSyncClient(
         try {
             val destinationStr = "$remotePath,$mode"
             val destBytes = destinationStr.toByteArray(Charsets.UTF_8)
-            stream.write(SyncCommand.createHeader(SyncCommand.ID_SEND, destBytes.size) + destBytes)
 
-            val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
-            var bytesWritten = 0L
-            var read: Int
+            // 小文件合并发送优化（Single Packet Merge）
+            if (totalSize in 0 until MAX_SYNC_DATA_SIZE) {
+                val smallSize = totalSize.toInt()
+                val totalPacketLen = SyncCommand.HEADER_SIZE + destBytes.size + 
+                                     SyncCommand.HEADER_SIZE + smallSize + 
+                                     SyncCommand.HEADER_SIZE
+                
+                val packetBuf = ByteBuffer.allocate(totalPacketLen).order(ByteOrder.LITTLE_ENDIAN)
+                
+                // 1. SEND Header + Dest
+                packetBuf.put(SyncCommand.ID_SEND.toByteArray(Charsets.US_ASCII))
+                packetBuf.putInt(destBytes.size)
+                packetBuf.put(destBytes)
 
-            while (inputStream.read(buffer).also { read = it } != -1) {
-                if (read > 0) {
-                    val dataHeader = SyncCommand.createHeader(SyncCommand.ID_DATA, read)
-                    val payload = if (read == buffer.size) buffer else buffer.copyOf(read)
-
-                    // 写入数据帧
-                    stream.write(dataHeader + payload)
-                    bytesWritten += read
-                    onProgress?.invoke(bytesWritten, totalSize)
+                // 2. DATA Header + Content
+                packetBuf.put(SyncCommand.ID_DATA.toByteArray(Charsets.US_ASCII))
+                packetBuf.putInt(smallSize)
+                
+                var readTotal = 0
+                while (readTotal < smallSize) {
+                    val read = inputStream.read(
+                        packetBuf.array(), 
+                        packetBuf.arrayOffset() + packetBuf.position(), 
+                        smallSize - readTotal
+                    )
+                    if (read < 0) break
+                    packetBuf.position(packetBuf.position() + read)
+                    readTotal += read
                 }
-            }
 
-            val doneHeader = SyncCommand.createHeader(SyncCommand.ID_DONE, sanitizeMtime(mtime))
-            stream.write(doneHeader)
+                // 3. DONE Header
+                packetBuf.put(SyncCommand.ID_DONE.toByteArray(Charsets.US_ASCII))
+                packetBuf.putInt(sanitizeMtime(mtime))
+
+                stream.write(packetBuf.array())
+                onProgress?.invoke(readTotal.toLong(), totalSize)
+            } else {
+                // 标准分块传输
+                stream.write(SyncCommand.createHeader(SyncCommand.ID_SEND, destBytes.size) + destBytes)
+
+                val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
+                var bytesWritten = 0L
+                var read: Int
+
+                while (inputStream.read(buffer).also { read = it } != -1) {
+                    if (read > 0) {
+                        val dataHeader = SyncCommand.createHeader(SyncCommand.ID_DATA, read)
+                        val payload = if (read == buffer.size) buffer else buffer.copyOf(read)
+
+                        stream.write(dataHeader + payload)
+                        bytesWritten += read
+                        onProgress?.invoke(bytesWritten, totalSize)
+                    }
+                }
+
+                val doneHeader = SyncCommand.createHeader(SyncCommand.ID_DONE, sanitizeMtime(mtime))
+                stream.write(doneHeader)
+            }
 
             val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
             val (id, len) = SyncCommand.parseHeader(respHeaderBytes)
@@ -148,7 +187,7 @@ public open class AdbSyncClient(
     }
 
     /**
-     * V1 Pull (RECV)
+     * V1 Pull (RECV) - 零内存分配写出
      */
     public suspend fun pull(
         remotePath: String,
@@ -171,8 +210,7 @@ public open class AdbSyncClient(
 
                 when (id) {
                     SyncCommand.ID_DATA -> {
-                        val chunk = reader.readExactBytes(len)
-                        outputStream.write(chunk)
+                        reader.readToStream(outputStream, len)
                         bytesRead += len
                         onProgress?.invoke(bytesRead, fileStat.size)
                     }
