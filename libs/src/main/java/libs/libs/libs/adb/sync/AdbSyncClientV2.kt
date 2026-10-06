@@ -42,6 +42,9 @@ public class AdbSyncClientV2(
         return supported
     }
 
+    /**
+     * V2 Stat (STA2)
+     */
     public suspend fun statV2(remotePath: String): FileStatV2 = withContext(Dispatchers.IO) {
         if (isV2Supported()) {
             val (stream, reader) = openSyncReader()
@@ -55,16 +58,22 @@ public class AdbSyncClientV2(
                 stream.write(requestBytes)
 
                 val respHeader = reader.readExactBytes(SyncCommand.HEADER_SIZE)
-                val (id, _) = SyncCommand.parseHeader(respHeader)
+                val (id, error) = SyncCommand.parseHeader(respHeader)
 
                 if (id == SyncCommandV2.ID_STA2 || id == SyncCommandV2.ID_LSTA) {
-                    val payload = reader.readExactBytes(68)
-                    return@withContext ByteBuffer.wrap(payload)
-                        .order(ByteOrder.LITTLE_ENDIAN)
-                        .parseSyncStatV2(remotePath)
+                    // STA2 结构全长 72 字节 (4B id + 4B error + 64B stat payload)
+                    // respHeader 已读 8 字节 (id + error)，只需再读 64 字节
+                    val remainingBytes = reader.readExactBytes(64)
+                    
+                    val fullPayload = ByteBuffer.allocate(68).order(ByteOrder.LITTLE_ENDIAN)
+                        .putInt(error)
+                        .put(remainingBytes)
+                    
+                    (fullPayload.flip() as ByteBuffer)
+                    return@withContext fullPayload.parseSyncStatV2(remotePath)
                 }
             } catch (_: Exception) {
-                // 异常自动 Fallback
+                // 发生异常自动降级到 V1
             } finally {
                 stream.close()
             }
@@ -73,6 +82,9 @@ public class AdbSyncClientV2(
         stat(remotePath).toFileStatV2()
     }
 
+    /**
+     * V2 List (LST2)
+     */
     public suspend fun listV2(remotePath: String): List<FileStatV2> = withContext(Dispatchers.IO) {
         if (isV2Supported()) {
             val (stream, reader) = openSyncReader()
@@ -91,21 +103,35 @@ public class AdbSyncClientV2(
 
                 while (true) {
                     val headerBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
-                    val (id, nameLen) = SyncCommand.parseHeader(headerBytes)
+                    val (id, error) = SyncCommand.parseHeader(headerBytes)
 
                     when (id) {
                         SyncCommandV2.ID_DNT2 -> {
                             isV2Valid = true
-                            val statBytes = reader.readExactBytes(68)
+                            
+                            // AOSP DNT2 结构全长 76 字节 + 文件名:
+                            // [4B "DNT2"][4B error][64B stat payload][4B namelen][namelen 字节 name]
+                            // headerBytes 已读 8 字节(id + error)，还需读 68 字节(64B stat + 4B namelen)
+                            val remainingBytes = reader.readExactBytes(68)
+                            
+                            // 提取最后 4 字节的 namelen
+                            val buf = ByteBuffer.wrap(remainingBytes).order(ByteOrder.LITTLE_ENDIAN)
+                            val statPayloadBytes = ByteArray(64)
+                            buf.get(statPayloadBytes)
+                            val nameLen = buf.int
+
                             val nameBytes = reader.readExactBytes(nameLen)
                             val fileName = String(nameBytes, Charsets.UTF_8)
 
                             if (fileName != "." && fileName != ".." && !fileName.contains("/") && !fileName.contains("\\")) {
                                 val fullPath = if (remotePath.endsWith("/")) "$remotePath$fileName" else "$remotePath/$fileName"
-                                val fileStat = ByteBuffer.wrap(statBytes)
-                                    .order(ByteOrder.LITTLE_ENDIAN)
-                                    .parseSyncStatV2(fullPath)
-                                entries.add(fileStat)
+                                
+                                val statBuf = ByteBuffer.allocate(68).order(ByteOrder.LITTLE_ENDIAN)
+                                    .putInt(error)
+                                    .put(statPayloadBytes)
+                                
+                                (statBuf.flip() as ByteBuffer)
+                                entries.add(statBuf.parseSyncStatV2(fullPath))
                             }
                         }
                         SyncCommandV2.ID_LST2, SyncCommand.ID_DONE -> {
@@ -118,12 +144,13 @@ public class AdbSyncClientV2(
 
                 if (isV2Valid) return@withContext entries
             } catch (_: Exception) {
+                // Fallback 到 V1
             } finally {
                 stream.close()
             }
         }
 
-        // Fallback 到 V1 List 并格式化为 V2
+        // Fallback 到 V1 List 并转换封装
         val v1Entries = list(remotePath)
         v1Entries.map { dent ->
             FileStatV2(
@@ -146,7 +173,7 @@ public class AdbSyncClientV2(
         mtime: Long = System.currentTimeMillis() / 1000,
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
-        if (flags == SyncFlags.FLAG_NONE && isV2Supported()) {
+        if (isV2Supported()) {
             var v2Success = false
             val (stream, reader) = openSyncReader()
             try {
@@ -183,7 +210,7 @@ public class AdbSyncClientV2(
             } catch (e: IllegalStateException) {
                 throw e
             } catch (_: Exception) {
-                // 传输降级
+                // 传输异常降级
             } finally {
                 stream.close()
             }
@@ -203,12 +230,12 @@ public class AdbSyncClientV2(
         flags: Int = SyncFlags.FLAG_NONE,
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
-        if (flags == SyncFlags.FLAG_NONE && isV2Supported()) {
-            var v2Success = false
-            val (stream, reader) = openSyncReader()
-            try {
-                val fileStat = statV2(remotePath)
-                if (fileStat.exists) {
+        if (isV2Supported()) {
+            val fileStat = statV2(remotePath)
+            if (fileStat.exists) {
+                var v2Success = false
+                val (stream, reader) = openSyncReader()
+                try {
                     val requestBytes = SyncCommandV2.createRequestV2(SyncCommandV2.ID_RCV2, 0, flags, remotePath)
                     stream.write(requestBytes)
 
@@ -238,15 +265,15 @@ public class AdbSyncClientV2(
                         }
                     }
                     outputStream.flush()
+                } catch (e: IllegalStateException) {
+                    throw e
+                } catch (_: Exception) {
+                } finally {
+                    stream.close()
                 }
-            } catch (e: IllegalStateException) {
-                throw e
-            } catch (_: Exception) {
-            } finally {
-                stream.close()
-            }
 
-            if (v2Success) return@withContext
+                if (v2Success) return@withContext
+            }
         }
 
         pull(remotePath, outputStream, onProgress)

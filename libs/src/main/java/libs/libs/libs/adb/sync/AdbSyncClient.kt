@@ -39,15 +39,18 @@ public open class AdbSyncClient(
 
             stream.write(reqHeader + pathBytes)
 
+            // V1 STAT 响应总共 16 字节:
+            // [4 字节 "STAT"][4 字节 mode][4 字节 size][4 字节 mtime]
+            // parseHeader 读取前 8 字节: id="STAT", mode=value
             val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
-            val (id, _) = SyncCommand.parseHeader(respHeaderBytes)
+            val (id, mode) = SyncCommand.parseHeader(respHeaderBytes)
 
             check(id == SyncCommand.ID_STAT) { "Unexpected STAT response tag: $id" }
 
-            val statBytes = reader.readExactBytes(12)
+            // 剩余只需读取 8 字节 (size 4B + mtime 4B)
+            val statBytes = reader.readExactBytes(8)
             val buf = ByteBuffer.wrap(statBytes).order(ByteOrder.LITTLE_ENDIAN)
 
-            val mode = buf.int
             val size = buf.int.toLong() and 0xFFFFFFFFL
             val mtime = buf.int.toLong() and 0xFFFFFFFFL
 
@@ -67,13 +70,16 @@ public open class AdbSyncClient(
 
             while (true) {
                 val headerBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
-                val (id, _) = SyncCommand.parseHeader(headerBytes)
+                val (id, mode) = SyncCommand.parseHeader(headerBytes)
 
                 when (id) {
                     SyncCommand.ID_DENT -> {
-                        val dentBytes = reader.readExactBytes(16)
+                        // V1 DENT 结构文件名之前共 20 字节:
+                        // [4 字节 "DENT"][4 字节 mode][4 字节 size][4 字节 mtime][4 字节 namelen]
+                        // headerBytes 已读取 8 字节(id + mode)，剩余只需读取 12 字节 (size + mtime + namelen)
+                        val dentBytes = reader.readExactBytes(12)
                         val buf = ByteBuffer.wrap(dentBytes).order(ByteOrder.LITTLE_ENDIAN)
-                        val mode = buf.int
+                        
                         val size = buf.int.toLong() and 0xFFFFFFFFL
                         val mtime = buf.int.toLong() and 0xFFFFFFFFL
                         val nameLen = buf.int
@@ -81,7 +87,6 @@ public open class AdbSyncClient(
                         val nameBytes = reader.readExactBytes(nameLen)
                         val name = String(nameBytes, Charsets.UTF_8)
 
-                        // 路径穿越校验（遵循 AOSP 规范）
                         if (name != "." && name != ".." && !name.contains("/") && !name.contains("\\")) {
                             entries.add(DirectoryEntry(name, mode, size, mtime))
                         }
@@ -98,7 +103,7 @@ public open class AdbSyncClient(
     }
 
     /**
-     * V1 Push (SEND) - 带小文件打包合并优化
+     * V1 Push (SEND)
      */
     public suspend fun push(
         inputStream: InputStream,
@@ -113,11 +118,20 @@ public open class AdbSyncClient(
             val destinationStr = "$remotePath,$mode"
             val destBytes = destinationStr.toByteArray(Charsets.UTF_8)
 
-            // 小文件合并发送优化（Single Packet Merge）
+            // 小文件合并发送优化
             if (totalSize in 0 until MAX_SYNC_DATA_SIZE) {
-                val smallSize = totalSize.toInt()
+                val expectedSize = totalSize.toInt()
+                val dataBuffer = ByteArray(expectedSize)
+                
+                var readTotal = 0
+                while (readTotal < expectedSize) {
+                    val read = inputStream.read(dataBuffer, readTotal, expectedSize - readTotal)
+                    if (read < 0) break
+                    readTotal += read
+                }
+
                 val totalPacketLen = SyncCommand.HEADER_SIZE + destBytes.size + 
-                                     SyncCommand.HEADER_SIZE + smallSize + 
+                                     SyncCommand.HEADER_SIZE + readTotal + 
                                      SyncCommand.HEADER_SIZE
                 
                 val packetBuf = ByteBuffer.allocate(totalPacketLen).order(ByteOrder.LITTLE_ENDIAN)
@@ -129,19 +143,8 @@ public open class AdbSyncClient(
 
                 // 2. DATA Header + Content
                 packetBuf.put(SyncCommand.ID_DATA.toByteArray(Charsets.US_ASCII))
-                packetBuf.putInt(smallSize)
-                
-                var readTotal = 0
-                while (readTotal < smallSize) {
-                    val read = inputStream.read(
-                        packetBuf.array(), 
-                        packetBuf.arrayOffset() + packetBuf.position(), 
-                        smallSize - readTotal
-                    )
-                    if (read < 0) break
-                    packetBuf.position(packetBuf.position() + read)
-                    readTotal += read
-                }
+                packetBuf.putInt(readTotal)
+                packetBuf.put(dataBuffer, 0, readTotal)
 
                 // 3. DONE Header
                 packetBuf.put(SyncCommand.ID_DONE.toByteArray(Charsets.US_ASCII))
@@ -187,18 +190,19 @@ public open class AdbSyncClient(
     }
 
     /**
-     * V1 Pull (RECV) - 零内存分配写出
+     * V1 Pull (RECV)
      */
     public suspend fun pull(
         remotePath: String,
         outputStream: OutputStream,
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
+        // 先查询 stat，确认文件存在后再开传输流，避免占用无用流
+        val fileStat = stat(remotePath)
+        check(fileStat.exists) { "Remote file does not exist: $remotePath" }
+
         val (stream, reader) = openSyncReader()
         try {
-            val fileStat = stat(remotePath)
-            check(fileStat.exists) { "Remote file does not exist: $remotePath" }
-
             val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
             stream.write(SyncCommand.createHeader(SyncCommand.ID_RECV, pathBytes.size) + pathBytes)
 
