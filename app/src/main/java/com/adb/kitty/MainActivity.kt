@@ -1141,54 +1141,56 @@ class MainActivity : ComponentActivity() {
                         val localPath = tokens.getOrNull(1)
                         val remotePath = tokens.getOrNull(2)
                         if (localPath.isNullOrBlank() || remotePath.isNullOrBlank()) {
-                            appendLog("[error] 参数错误，用法: adb push <本地文件路径> <远程路径>")
+                            appendLog("[error] 参数错误，用法: adb push <本地路径> <远程路径>")
                             return@launch
                         }
                         val localFile = File(localPath)
                         if (!localFile.exists()) {
-                            appendLog("[error] 本地文件不存在: $localPath")
+                            appendLog("[error] 本地文件/目录不存在: $localPath")
                             return@launch
                         }
 
-                        appendLog("[info] 正在推送到 $remotePath ...")
-                        var lastProgress = -1
-                        val res = client.pushFile(localFile, remotePath) { written, total ->
+                        appendLog("[info] 正在推送 $localPath 到 $remotePath ...")
+                        var lastProgressStep = -1
+                        val res = client.push(localFile, remotePath) { written, total ->
                             if (total > 0) {
                                 val percent = ((written * 100) / total).toInt()
-                                if (percent % 25 == 0 && percent != lastProgress) {
-                                    lastProgress = percent
+                                val step = percent / 25 // 计算处于第几个 25% 区间 (0, 1, 2, 3, 4)
+                                if (step != lastProgressStep) {
+                                    lastProgressStep = step
                                     appendLog("[info] 推送进度: $percent% ($written/$total B)")
                                 }
                             }
                         }
 
-                        res.onSuccess { appendLog("[success] 文件推送成功") }
-                           .onFailure { appendLog("[error] 文件推送失败: ${it.message}") }
+                        res.onSuccess { appendLog("[success] 推送完成") }
+                           .onFailure { appendLog("[error] 推送失败: ${it.message}") }
                     }
 
                     "pull" -> {
                         val remotePath = tokens.getOrNull(1)
                         val localPath = tokens.getOrNull(2)
                         if (remotePath.isNullOrBlank() || localPath.isNullOrBlank()) {
-                            appendLog("[error] 参数错误，用法: adb pull <远程路径> <本地文件路径>")
+                            appendLog("[error] 参数错误，用法: adb pull <远程路径> <本地路径>")
                             return@launch
                         }
                         val localFile = File(localPath)
 
-                        appendLog("[info] 正在拉取 $remotePath 到 $localPath ...")
-                        var lastProgress = -1
-                        val res = client.pullFile(remotePath, localFile) { read, total ->
+                        appendLog("[info] 正在从 $remotePath 拉取到 $localPath ...")
+                        var lastProgressStep = -1
+                        val res = client.pull(remotePath, localFile) { read, total ->
                             if (total > 0) {
                                 val percent = ((read * 100) / total).toInt()
-                                if (percent % 25 == 0 && percent != lastProgress) {
-                                    lastProgress = percent
+                                val step = percent / 25
+                                if (step != lastProgressStep) {
+                                    lastProgressStep = step
                                     appendLog("[info] 拉取进度: $percent% ($read/$total B)")
                                 }
                             }
                         }
 
-                        res.onSuccess { appendLog("[success] 文件拉取成功") }
-                           .onFailure { appendLog("[error] 文件拉取失败: ${it.message}") }
+                        res.onSuccess { appendLog("[success] 拉取完成") }
+                           .onFailure { appendLog("[error] 拉取失败: ${it.message}") }
                     }
 
                     // 应用安装 (支持 .apk 和 .apks) (adb install)

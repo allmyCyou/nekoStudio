@@ -43,6 +43,15 @@ import java.io.InputStream
 private class MdnsSuccessException : CancellationException("mDNS operation succeeded")
 
 /**
+ * 远端文件节点元数据（内部目录树扫描使用）
+ */
+private data class RemoteFileInfo(
+    val remotePath: String,
+    val relativePath: String,
+    val size: Long
+)
+
+/**
  * 统一 ADB 客户端门面 (Facade)
  * 整合 Connection、Pair (SPAKE2)、Shell、ABB、Sync(V2)、Root、mDNS 自动发现 以及 USB Host/Accessory 模块
  */
@@ -126,12 +135,6 @@ public class AdbClient(
 
     /**
      * 通过 mDNS 自动搜索局域网内的配对服务并完成无线配对
-     *
-     * @param context Context 实例
-     * @param pairingCode 6 位无线配对码
-     * @param deviceName 可选，过滤匹配的设备名称关键词 (为 null 时自动选中搜索到的第一个匹配项)
-     * @param timeoutMs mDNS 搜索超时时间 (单位: 毫秒)
-     * @param listener 配对过程监听回调
      */
     public suspend fun mdnsPair(
         context: Context,
@@ -162,17 +165,14 @@ public class AdbClient(
                         val ip = service.ipAddress ?: return@collect
                         val port = service.port
 
-                        // 1. 设备名称过滤
                         if (deviceName != null && !service.name.contains(deviceName, ignoreCase = true)) {
                             return@collect
                         }
 
-                        // 2. 按 (IP, Port) 防重，避免对同一端口重复尝试
                         if (!attemptedEndpoints.add(ip to port)) {
                             return@collect
                         }
 
-                        // 3. 尝试进行无线配对
                         val res = pair(
                             host = ip,
                             port = port,
@@ -182,7 +182,7 @@ public class AdbClient(
 
                         if (res.isSuccess) {
                             successResult = res.getOrThrow()
-                            throw MdnsSuccessException() // 配对成功，终止 Flow 监听
+                            throw MdnsSuccessException()
                         } else {
                             val errMsg = res.exceptionOrNull()?.message ?: "Pairing failed"
                             failedLogs.add("$ip:$port ($errMsg)")
@@ -204,8 +204,6 @@ public class AdbClient(
 
     /**
      * 连接 TCP 无线/网络设备
-     * 明确返回连接结果 Result<AdbConnectionState.Connected>，方便上层业务判断连接是否成功
-     * 这里以 Redmi K80 设备的特征为标准来进行显式声明
      */
     public suspend fun connect(
         host: String,
@@ -219,12 +217,6 @@ public class AdbClient(
 
     /**
      * 通过 mDNS 自动搜索局域网内的 TLS 调试服务并建立 ADB 连接
-     *
-     * @param context Context 实例
-     * @param deviceName 可选，过滤匹配的设备名称关键词 (为 null 时自动选中搜索到的第一个匹配项)
-     * @param systemIdentity 系统的 ADB 识别标识串
-     * @param mdnsTimeoutMs mDNS 搜索超时时间 (单位: 毫秒)
-     * @param connectTimeoutMs Socket/TLS 建连超时时间 (单位: 毫秒)
      */
     public suspend fun mdnsConnect(
         context: Context,
@@ -261,17 +253,14 @@ public class AdbClient(
                         val ip = service.ipAddress ?: return@collect
                         val port = service.port
 
-                        // 1. 设备名称过滤
                         if (deviceName != null && !service.name.contains(deviceName, ignoreCase = true)) {
                             return@collect
                         }
 
-                        // 2. 按 (IP, Port) 防重，避免对同一端口重复尝试
                         if (!attemptedEndpoints.add(ip to port)) {
                             return@collect
                         }
 
-                        // 3. 尝试建立 ADB TLS 连接
                         val res = connect(
                             host = ip,
                             port = port,
@@ -281,7 +270,7 @@ public class AdbClient(
 
                         if (res.isSuccess) {
                             successResult = res.getOrThrow()
-                            throw MdnsSuccessException() // 建连成功，终止 Flow 监听
+                            throw MdnsSuccessException()
                         } else {
                             val errMsg = res.exceptionOrNull()?.message ?: "Connection failed"
                             failedLogs.add("$ip:$port ($errMsg)")
@@ -302,11 +291,7 @@ public class AdbClient(
     }
 
     /**
-     * 搜索局域网内所有 mDNS 设备列表（同时并发扫描 CONNECT、PAIRING、LEGACY 等所有类型）
-     *
-     * @param context Context 实例
-     * @param types 需要扫描的服务类型列表，默认并发扫描所有 [AdbMdnsType]
-     * @param scanDurationMs 持续扫描的时间（单位：毫秒）
+     * 搜索局域网内所有 mDNS 设备列表
      */
     public suspend fun mdnsList(
         context: Context,
@@ -324,11 +309,9 @@ public class AdbClient(
     ): List<AdbMdnsServiceInfo> {
         val results = mutableListOf<AdbMdnsServiceInfo>()
         withTimeoutOrNull(scanDurationMs) {
-            // 合并所有类型 Flow，多通道并发扫描
             types.map { mdnsManager.discoverServices(it) }
                 .merge()
                 .collect { service ->
-                    // 确保已解析出 IP，并按 IP 与 Port 防重
                     if (service.ipAddress != null && results.none { it.ipAddress == service.ipAddress && it.port == service.port }) {
                         results.add(service)
                     }
@@ -342,7 +325,7 @@ public class AdbClient(
     }
 
     /**
-     * 检查并确保 RSA 密钥已被正确加载或初始化（优先从磁盘读取，文件不存在时才自动生成）
+     * 检查并确保 RSA 密钥已被正确加载或初始化
      */
     public fun ensureKeyLoaded() {
         val defaultComment = "nekoStudio@adbClient"
@@ -383,7 +366,7 @@ public class AdbClient(
             val success = stream != null
             stream?.close()
             success
-        }.getOrDefault(true) // 设备执行 reboot 后网络会立即切断，抛出异常通常代表命令已成功投递
+        }.getOrDefault(true)
     }
 
     // 应用安装与卸载 API
@@ -421,8 +404,11 @@ public class AdbClient(
         options: AbbUninstallOptions = AbbUninstallOptions()
     ): Result<Unit> = abb.uninstall(packageName, options)
 
-    // 文件传输 API
+    // 文件传输 API（基础单文件 API & 增强版目录树 Landing Path API）
 
+    /**
+     * 推送 (Push) 单个本地文件到设备指定的远端绝对路径
+     */
     public suspend fun pushFile(
         localFile: File,
         remotePath: String,
@@ -430,6 +416,7 @@ public class AdbClient(
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            require(localFile.exists() && localFile.isFile) { "推送源必须是存在的单文件: ${localFile.absolutePath}" }
             localFile.inputStream().use { inputStream ->
                 sync.pushV2(
                     inputStream = inputStream,
@@ -442,6 +429,9 @@ public class AdbClient(
         }
     }
 
+    /**
+     * 从设备远端绝对路径拉取 (Pull) 单个文件到本地
+     */
     public suspend fun pullFile(
         remotePath: String,
         localFile: File,
@@ -449,6 +439,8 @@ public class AdbClient(
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            // 确保本地父级目录已自动创建
+            localFile.parentFile?.mkdirs()
             localFile.outputStream().use { outputStream ->
                 sync.pullV2(
                     remotePath = remotePath,
@@ -458,5 +450,168 @@ public class AdbClient(
                 )
             }
         }
+    }
+
+    /**
+     * 增强 Push API：处理文件或目录树传输，并按标准 `adb push` 规范推算落地路径
+     *
+     * 1. 若 [local] 为单个文件：
+     *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，文件落地为 `remotePath/local.name`
+     *    - 否则文件落地为 `remotePath`
+     * 2. 若 [local] 为目录：
+     *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，远端基准目录为 `remotePath/local.name`
+     *    - 否则远端基准目录为 `remotePath`
+     *    - 自动递归展开本地目录树并依次上传，实时计算并回调总体传输进度
+     */
+    public suspend fun push(
+        local: File,
+        remotePath: String,
+        flags: Int = SyncFlags.FLAG_NONE,
+        onProgress: ((written: Long, total: Long) -> Unit)? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            require(local.exists()) { "本地路径不存在: ${local.absolutePath}" }
+
+            val isRemoteDir = isRemoteDirectory(remotePath) || remotePath.endsWith("/")
+
+            if (local.isFile) {
+                val targetRemotePath = if (isRemoteDir) {
+                    "${remotePath.trimEnd('/')}/${local.name}"
+                } else {
+                    remotePath
+                }
+                pushFile(local, targetRemotePath, flags, onProgress).getOrThrow()
+            } else if (local.isDirectory) {
+                val baseRemoteDir = if (isRemoteDir) {
+                    "${remotePath.trimEnd('/')}/${local.name}"
+                } else {
+                    remotePath.trimEnd('/')
+                }
+
+                // 收集所有子文件计算总字节数
+                val allFiles = local.walkTopDown().filter { it.isFile }.toList()
+                val totalBytes = allFiles.sumOf { it.length() }
+                var accumulatedBytes = 0L
+
+                for (file in allFiles) {
+                    val relativePath = file.relativeTo(local).path.replace('\\', '/')
+                    val targetPath = "$baseRemoteDir/$relativePath"
+
+                    pushFile(file, targetPath, flags) { fileWritten, _ ->
+                        onProgress?.invoke(accumulatedBytes + fileWritten, totalBytes)
+                    }.getOrThrow()
+
+                    accumulatedBytes += file.length()
+                }
+            }
+        }
+    }
+
+    /**
+     * 增强 Pull API：处理文件或目录树从设备拉取，并按标准 `adb pull` 规范推算落地路径
+     * 包含防路径穿越 (Path Traversal / Zip Slip) 安全校验
+     *
+     * 1. 若 [remotePath] 为单文件：
+     *    - 当 [local] 为已存在目录或路径以分隔符结尾，落地文件为 `File(local, remoteFileName)`
+     *    - 否则落地文件为 `local`
+     * 2. 若 [remotePath] 为目录：
+     *    - 当 [local] 为已存在目录，本地基准目录为 `File(local, remoteDirName)`
+     *    - 否则本地基准目录为 `local`
+     *    - 递归扫描远端目录结构，校验安全性后批量拉取落地，实时回调总体进度
+     */
+    public suspend fun pull(
+        remotePath: String,
+        local: File,
+        flags: Int = SyncFlags.FLAG_NONE,
+        onProgress: ((read: Long, total: Long) -> Unit)? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val isRemoteDir = isRemoteDirectory(remotePath) || remotePath.endsWith("/")
+
+            if (!isRemoteDir) {
+                val targetLocalFile = if (local.isDirectory || local.path.endsWith(File.separator) || local.path.endsWith("/")) {
+                    File(local, remotePath.trimEnd('/').substringAfterLast('/'))
+                } else {
+                    local
+                }
+                pullFile(remotePath, targetLocalFile, flags, onProgress).getOrThrow()
+            } else {
+                val remoteCleanPath = remotePath.trimEnd('/')
+                val baseLocalDir = if (local.exists() && local.isDirectory) {
+                    File(local, remoteCleanPath.substringAfterLast('/'))
+                } else {
+                    local
+                }
+
+                // 1. 递归扫描远端文件树结构及尺寸
+                val remoteFiles = scanRemoteTree(remoteCleanPath)
+                val totalBytes = remoteFiles.sumOf { it.size }
+                var accumulatedBytes = 0L
+
+                // 2. 依次拉取各个文件
+                for (item in remoteFiles) {
+                    val targetLocalFile = File(baseLocalDir, item.relativePath)
+
+                    // 路径穿越安全防护 (Zip Slip Protection)
+                    val canonicalDest = targetLocalFile.canonicalPath
+                    val canonicalBase = baseLocalDir.canonicalPath
+                    if (!canonicalDest.startsWith(canonicalBase)) {
+                        throw SecurityException("检测到非法路径穿越尝试: ${item.relativePath}")
+                    }
+
+                    pullFile(item.remotePath, targetLocalFile, flags) { fileRead, _ ->
+                        onProgress?.invoke(accumulatedBytes + fileRead, totalBytes)
+                    }.getOrThrow()
+
+                    accumulatedBytes += item.size
+                }
+            }
+        }
+    }
+
+    /**
+     * 判断远端路径是否为目录 (基于 stat_v2 mode 字段的 0xF000 & 0x4000 位掩码)
+     */
+    private suspend fun isRemoteDirectory(remotePath: String): Boolean {
+        return runCatching {
+            val stat = sync.statV2(remotePath)
+            // POSIX 文件类型掩码: S_IFMT = 0xF000, S_IFDIR = 0x4000
+            (stat.mode and 0xF000) == 0x4000
+        }.getOrDefault(false)
+    }
+
+    /**
+     * 递归扫描远端文件树
+     */
+    private suspend fun scanRemoteTree(
+        baseRemoteDir: String,
+        currentRelativeDir: String = "",
+        depth: Int = 0
+    ): List<RemoteFileInfo> {
+        if (depth > 32) return emptyList() // 避免循环软链接导致无限递归
+
+        val result = mutableListOf<RemoteFileInfo>()
+        val currentRemoteDir = if (currentRelativeDir.isEmpty()) {
+            baseRemoteDir
+        } else {
+            "$baseRemoteDir/$currentRelativeDir"
+        }
+
+        sync.listV2(currentRemoteDir).collect { stat ->
+            val name = stat.name
+            if (name == "." || name == ".." || name.isBlank()) return@collect
+
+            val relativePath = if (currentRelativeDir.isEmpty()) name else "$currentRelativeDir/$name"
+            val fullRemotePath = "$baseRemoteDir/$relativePath"
+            val isDirectory = (stat.mode and 0xF000) == 0x4000
+
+            if (isDirectory) {
+                result.addAll(scanRemoteTree(baseRemoteDir, relativePath, depth + 1))
+            } else {
+                result.add(RemoteFileInfo(fullRemotePath, relativePath, stat.size))
+            }
+        }
+
+        return result
     }
 }
