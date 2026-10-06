@@ -129,6 +129,7 @@ class MainActivity : ComponentActivity() {
     private var epOut: UsbEndpoint? = null
     private var readerJob: Job? = null
     private var logCollectJob: Job? = null
+    private var activeStream: AdbStream? = null
 
     private var isUsbAttached = false
     private var isAdbAuthorized = false
@@ -1092,9 +1093,14 @@ class MainActivity : ComponentActivity() {
                     }
 
                     "--shell-exit" -> {
-                        appendLog("[info] 已主动关闭 adb Shell 流")
-                        val res = client.shell.exit(AdbStream)
-                        appendLog(res.stdout.ifEmpty { res.stderr })
+                        val stream = activeStream
+                        if (stream != null) {
+                            client.shell.exit(stream)
+                            activeStream = null
+                            appendLog("[info] 已成功主动关闭 adb Shell 流")
+                        } else {
+                            appendLog("[warn] 当前没有正在运行的 Shell 流")
+                        }
                     }
 
                     "root" -> {
