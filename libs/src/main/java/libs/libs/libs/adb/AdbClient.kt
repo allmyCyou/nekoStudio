@@ -570,13 +570,12 @@ public class AdbClient(
     }
 
     /**
-     * 判断远端路径是否为目录 (基于 stat_v2 mode 字段的 0xF000 & 0x4000 位掩码)
+     * 判断远端路径是否为目录
      */
     private suspend fun isRemoteDirectory(remotePath: String): Boolean {
         return runCatching {
             val stat = sync.statV2(remotePath)
-            // POSIX 文件类型掩码: S_IFMT = 0xF000, S_IFDIR = 0x4000
-            (stat.mode and 0xF000) == 0x4000
+            stat.exists && stat.isDirectory
         }.getOrDefault(false)
     }
 
@@ -597,19 +596,21 @@ public class AdbClient(
             "$baseRemoteDir/$currentRelativeDir"
         }
 
-        // listV2 返回的是 List<FileStatV2>，使用 for 循环遍历
         val dirEntries = runCatching { sync.listV2(currentRemoteDir) }.getOrDefault(emptyList())
         for (stat in dirEntries) {
-            val name = stat.name
-            if (name == "." || name == ".." || name.isBlank()) continue
+            // 过滤无效或出错的节点
+            if (!stat.exists) continue
 
-            val relativePath = if (currentRelativeDir.isEmpty()) name else "$currentRelativeDir/$name"
+            // 提取节点文件名（确保兼顾绝对路径与纯文件名返回格式）
+            val fileName = stat.path.trimEnd('/').substringAfterLast('/')
+            if (fileName == "." || fileName == ".." || fileName.isBlank()) continue
+
+            val relativePath = if (currentRelativeDir.isEmpty()) fileName else "$currentRelativeDir/$fileName"
             val fullRemotePath = "$baseRemoteDir/$relativePath"
-            val isDirectory = (stat.mode and 0xF000) == 0x4000
 
-            if (isDirectory) {
+            if (stat.isDirectory) {
                 result.addAll(scanRemoteTree(baseRemoteDir, relativePath, depth + 1))
-            } else {
+            } else if (stat.isFile) {
                 result.add(RemoteFileInfo(fullRemotePath, relativePath, stat.size))
             }
         }
