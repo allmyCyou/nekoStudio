@@ -597,9 +597,11 @@ public class AdbClient(
             "$baseRemoteDir/$currentRelativeDir"
         }
 
-        sync.listV2(currentRemoteDir).collect { stat ->
+        // listV2 返回的是 List<FileStatV2>，使用 for 循环遍历
+        val dirEntries = runCatching { sync.listV2(currentRemoteDir) }.getOrDefault(emptyList())
+        for (stat in dirEntries) {
             val name = stat.name
-            if (name == "." || name == ".." || name.isBlank()) return@collect
+            if (name == "." || name == ".." || name.isBlank()) continue
 
             val relativePath = if (currentRelativeDir.isEmpty()) name else "$currentRelativeDir/$name"
             val fullRemotePath = "$baseRemoteDir/$relativePath"
