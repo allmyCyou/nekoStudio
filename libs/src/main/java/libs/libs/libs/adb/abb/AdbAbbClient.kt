@@ -6,6 +6,7 @@ import libs.libs.libs.adb.shell.ShellCommandResult
 import libs.libs.libs.adb.shell.ShellV2Buffer
 import libs.libs.libs.adb.shell.ShellV2Packet
 import libs.libs.libs.adb.sync.AdbSyncClientV2
+import io.ktor.utils.io.jvm.javaio.toByteReadChannel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -291,7 +292,6 @@ public class AdbAbbClient(
                     onProgress?.invoke(bytesWritten, size)
                 }
             }
-            // Removed writeStream.flush() as AdbStream does not define flush()
         } finally {
             writeStream.close()
         }
@@ -306,7 +306,7 @@ public class AdbAbbClient(
         try {
             apkFile.inputStream().use { stream ->
                 syncClient.pushV2(
-                    inputStream = stream,
+                    channel = stream.toByteReadChannel(),
                     remotePath = tempPath,
                     totalSize = apkFile.length(),
                     onProgress = onProgress
@@ -411,7 +411,7 @@ public class AdbAbbClient(
                     try {
                         zip.getInputStream(entry).use { inputStream ->
                             syncClient.pushV2(
-                                inputStream = inputStream,
+                                channel = inputStream.toByteReadChannel(),
                                 remotePath = tempPath,
                                 totalSize = entry.size,
                                 onProgress = { read, _ ->
@@ -515,7 +515,7 @@ public class AdbAbbClient(
                 try {
                     inputStream.use { stream ->
                         syncClient.pushV2(
-                            inputStream = stream,
+                            channel = stream.toByteReadChannel(),
                             remotePath = tempPath,
                             totalSize = size,
                             onProgress = { read, _ ->
