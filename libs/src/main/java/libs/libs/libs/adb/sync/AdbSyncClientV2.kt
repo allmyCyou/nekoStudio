@@ -47,10 +47,8 @@ public class AdbSyncClientV2(
         if (isV2Supported()) {
             val (stream, reader) = openSyncReader()
             try {
-                val requestBytes = SyncCommandV2.createRequestV2(
+                val requestBytes = SyncCommandV2.createStatOrListRequestV2(
                     id = SyncCommandV2.ID_STA2,
-                    mode = 0,
-                    flags = SyncFlags.FLAG_NONE,
                     remotePath = remotePath
                 )
                 stream.write(requestBytes)
@@ -83,13 +81,16 @@ public class AdbSyncClientV2(
     /**
      * V2 List (LST2)
      */
-    public suspend fun listV2(remotePath: String): FileStatV2 = withContext(Dispatchers.IO) {
+    public suspend fun listV2(remotePath: String): List<FileStatV2> = withContext(Dispatchers.IO) {
         if (isV2Supported()) {
             val (stream, reader) = openSyncReader()
+            val entries = mutableListOf<FileStatV2>()
 
             try {
                 val requestBytes = SyncCommandV2.createStatOrListRequestV2(
-                    id = SyncCommandV2.ID_STA2,
+                    id = SyncCommandV2.ID_LST2,
+                    mode = 0,
+                    flags = SyncFlags.FLAG_NONE,
                     remotePath = remotePath
                 )
                 stream.write(requestBytes)
