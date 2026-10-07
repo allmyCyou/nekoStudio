@@ -3,6 +3,7 @@ package libs.libs.libs.adb.sync
 import libs.libs.libs.adb.connect.AdbConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
