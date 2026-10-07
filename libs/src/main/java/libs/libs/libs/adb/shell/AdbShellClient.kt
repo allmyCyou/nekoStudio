@@ -151,13 +151,13 @@ public class AdbShellClient(
                         exitCode = -1, stdout = "", stderr = "Failed to open shell_v2 stream", durationMs = 0L
                     )
 
-                activeStreams[sessionId] = stream!!
+                activeStreams[sessionId] = stream
 
                 val stdoutStream = BoundedOutputStream(maxOutputSize)
                 val stderrStream = BoundedOutputStream(maxOutputSize)
                 var exitCode = -1
 
-                readShellV2Stream(stream!!) { packet ->
+                readShellV2Stream(stream) { packet ->
                     when (packet.id) {
                         ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
                         ShellV2Packet.ID_STDERR -> stderrStream.write(packet.payload)
@@ -210,11 +210,11 @@ public class AdbShellClient(
                         exitCode = -1, stdout = "", stderr = "Failed to open exec stream", durationMs = 0L
                     )
 
-                activeStreams[sessionId] = stream!!
+                activeStreams[sessionId] = stream
 
                 val outputStream = BoundedOutputStream(maxOutputSize)
                 while (true) {
-                    val data = stream!!.read() ?: break
+                    val data = stream.read() ?: break
                     if (data.isNotEmpty()) outputStream.write(data)
                 }
 

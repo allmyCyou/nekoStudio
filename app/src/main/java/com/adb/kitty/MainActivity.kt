@@ -1091,19 +1091,16 @@ class MainActivity : ComponentActivity() {
                     "shell" -> {
                         val cmd = adbCmd.removePrefix("shell").trim()
 
-                        // 1. 若当前已有正在运行的持续流（如上次执行了 logcat 未关闭），先自动释放旧流
                         activeSessionId?.let { oldId ->
-                            scope.launch { client.shell.exit(oldId) }
+                            lifecycleScope.launch { client.shell.exit(oldId) }
                             activeSessionJob?.cancel()
                             activeSessionId = null
                         }
 
-                        // 2. 开启流式传输，拿到 sessionId 和实时输出 Flow（秒级首包响应）
                         val (sessionId, streamFlow) = client.shell.execStreamWithSession(cmd)
                         activeSessionId = sessionId
 
-                        // 3. 在协程中实时收集 chunk 并更新日志，不阻塞主流程
-                        activeSessionJob = scope.launch {
+                        activeSessionJob = lifecycleScope.launch {
                             try {
                                 streamFlow.collect { chunk ->
                                     val text = String(chunk.data, Charsets.UTF_8)
@@ -1112,7 +1109,6 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             } finally {
-                                // 流自然结束（或被 cancel）时清理状态标志
                                 if (activeSessionId == sessionId) {
                                     activeSessionId = null
                                     activeSessionJob = null
@@ -1124,8 +1120,7 @@ class MainActivity : ComponentActivity() {
                     "--shell-exit" -> {
                         val sessionId = activeSessionId
                         if (sessionId != null) {
-                            scope.launch {
-                                // 主动调用 client.shell.exit(sessionId)，内部发送 ADB CLSE 切断通道并强杀设备端进程
+                            lifecycleScope.launch {
                                 val success = client.shell.exit(sessionId)
                                 if (success) {
                                     appendLog("[info] 已成功主动关闭 adb Shell 流 (Session: $sessionId)")
@@ -1133,7 +1128,6 @@ class MainActivity : ComponentActivity() {
                                     appendLog("[warn] 关闭 Shell 流失败或流已释放")
                                 }
                             }
-                            // 取消客户端日志收集协程
                             activeSessionJob?.cancel()
                             activeSessionId = null
                             activeSessionJob = null
@@ -1302,19 +1296,16 @@ class MainActivity : ComponentActivity() {
                         // 透传 Shell 命令
                         val cmd = adbCmd.trim()
 
-                        // 1. 若当前已有正在运行的持续流（如上次执行了 logcat 未关闭），先自动释放旧流
                         activeSessionId?.let { oldId ->
-                            scope.launch { client.shell.exit(oldId) }
+                            lifecycleScope.launch { client.shell.exit(oldId) }
                             activeSessionJob?.cancel()
                             activeSessionId = null
                         }
 
-                        // 2. 开启流式传输，拿到 sessionId 和实时输出 Flow（秒级首包响应）
                         val (sessionId, streamFlow) = client.shell.execStreamWithSession(cmd)
                         activeSessionId = sessionId
 
-                        // 3. 在协程中实时收集 chunk 并更新日志，不阻塞主流程
-                        activeSessionJob = scope.launch {
+                        activeSessionJob = lifecycleScope.launch {
                             try {
                                 streamFlow.collect { chunk ->
                                     val text = String(chunk.data, Charsets.UTF_8)
@@ -1323,7 +1314,6 @@ class MainActivity : ComponentActivity() {
                                     }
                                 }
                             } finally {
-                                // 流自然结束（或被 cancel）时清理状态标志
                                 if (activeSessionId == sessionId) {
                                     activeSessionId = null
                                     activeSessionJob = null
