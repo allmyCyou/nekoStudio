@@ -76,16 +76,20 @@ public class AdbAbbClient(
                 if (data.isNotEmpty()) {
                     v2Buffer.append(data)
                     while (true) {
-                        val packet = v2Buffer.pollPacket() ?: break
-                        when (packet.id) {
-                            ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
-                            ShellV2Packet.ID_STDERR -> stderrStream.write(packet.payload)
-                            ShellV2Packet.ID_EXIT -> {
-                                if (packet.payload.isNotEmpty()) {
-                                    exitCode = packet.payload[0].toInt() and 0xFF
+                        var hasPacket = false
+                        v2Buffer.pollPacket { id, buf, offset, length ->
+                            hasPacket = true
+                            when (id) {
+                                ShellV2Packet.ID_STDOUT -> stdoutStream.write(buf, offset, length)
+                                ShellV2Packet.ID_STDERR -> stderrStream.write(buf, offset, length)
+                                ShellV2Packet.ID_EXIT -> {
+                                    if (length > 0) {
+                                        exitCode = buf[offset].toInt() and 0xFF
+                                    }
                                 }
                             }
                         }
+                        if (!hasPacket) break
                     }
                 }
             }
@@ -125,11 +129,9 @@ public class AdbAbbClient(
                     return@runCatching
                 }
 
-                // 如果显式判定为不支持，或者会话报错，清除缓存标记并降级到 Legacy
                 if (isAbbSupportedCache == false) {
                     // 继续往下走 Legacy 流程
                 } else {
-                    // 如果尝试 ABB 过程中遭遇一般业务异常（如解析失败或参数错），直接抛出
                     abbResult.getOrThrow()
                 }
             }
@@ -151,7 +153,6 @@ public class AdbAbbClient(
         runCatching {
             require(apkSize > 0) { "Invalid APK size: $apkSize" }
 
-            // 为了保证降级时流数据不丢失，先将输入流写入临时文件
             val tempFile = File.createTempFile("temp_install_", ".apk")
             try {
                 tempFile.outputStream().use { output ->
@@ -291,7 +292,6 @@ public class AdbAbbClient(
                     onProgress?.invoke(bytesWritten, size)
                 }
             }
-            // Removed writeStream.flush() as AdbStream does not define flush()
         } finally {
             writeStream.close()
         }
