@@ -1188,7 +1188,7 @@ class MainActivity : ComponentActivity() {
                         val res = client.push(localFile, remotePath) { written, total ->
                             if (total > 0) {
                                 val percent = ((written * 100) / total).toInt()
-                                val step = percent / 25 // 25%, 50%, 75%, 100% 打印
+                                val step = percent / 25 // 计算处于第几个 25% 区间 (0, 1, 2, 3, 4)
                                 if (step != lastProgressStep) {
                                     lastProgressStep = step
                                     appendLog("[info] 推送进度: $percent% ($written/$total B)")
@@ -1199,7 +1199,7 @@ class MainActivity : ComponentActivity() {
                         res.onSuccess { appendLog("[success] 推送完成") }
                            .onFailure { appendLog("[error] 推送失败: ${it.message}") }
                     }
-                    
+
                     "pull" -> {
                         val remotePath = tokens.getOrNull(1)
                         val localPath = tokens.getOrNull(2)
@@ -1208,9 +1208,6 @@ class MainActivity : ComponentActivity() {
                             return@launch
                         }
                         val localFile = File(localPath)
-
-                        // 自动确保本地父目录存在，防止拉取文件到新路径时报错
-                        localFile.parentFile?.mkdirs()
 
                         appendLog("[info] 正在从 $remotePath 拉取到 $localPath ...")
                         var lastProgressStep = -1
@@ -1224,7 +1221,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
- 
+
                         res.onSuccess { appendLog("[success] 拉取完成") }
                            .onFailure { appendLog("[error] 拉取失败: ${it.message}") }
                     }

@@ -22,9 +22,6 @@
 -keep class org.** { *; }
 -dontwarn org.**
 
--keep class io.ktor.** { *; }
--dontwarn io.ktor.**
-
 -keep class kotlinx.serialization.** { *; }
 -dontwarn kotlinx.serialization.**
 

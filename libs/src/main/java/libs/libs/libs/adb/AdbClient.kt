@@ -3,11 +3,6 @@ package libs.libs.libs.adb
 import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
-import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.ByteWriteChannel
-import io.ktor.utils.io.ByteChannel
-import io.ktor.utils.io.jvm.javaio.toByteReadChannel
-import io.ktor.utils.io.jvm.javaio.copyTo
 import libs.libs.libs.adb.abb.AdbAbbClient
 import libs.libs.libs.adb.abb.AbbInstallOptions
 import libs.libs.libs.adb.abb.AbbUninstallOptions
@@ -22,16 +17,19 @@ import libs.libs.libs.adb.pair.AdbPairingManager
 import libs.libs.libs.adb.root.AdbRootClient
 import libs.libs.libs.adb.shell.AdbShellClient
 import libs.libs.libs.adb.shell.ShellCommandResult
+import libs.libs.libs.adb.shell.ShellStreamChunk
 import libs.libs.libs.adb.sync.AdbSyncClientV2
+import libs.libs.libs.adb.sync.FileStatV2
 import libs.libs.libs.adb.sync.SyncFlags
 import libs.libs.libs.adb.usb.accessory.AdbUsbAccessoryManager
 import libs.libs.libs.adb.usb.host.AdbUsbHostConnection
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -45,11 +43,12 @@ import java.io.InputStream
 private class MdnsSuccessException : CancellationException("mDNS operation succeeded")
 
 /**
- * 远端文件节点元数据（内部目录树扫描使用）
+ * 远端节点（文件或目录）元数据
  */
-private data class RemoteFileInfo(
+private data class RemoteNodeInfo(
     val remotePath: String,
     val relativePath: String,
+    val isDirectory: Boolean,
     val size: Long
 )
 
@@ -406,28 +405,7 @@ public class AdbClient(
         options: AbbUninstallOptions = AbbUninstallOptions()
     ): Result<Unit> = abb.uninstall(packageName, options)
 
-    // 文件传输 API（基础单文件/通道 API & 增强版目录树 Landing Path API）
-
-    /**
-     * 推送 (Push) ByteReadChannel 数据流到设备指定的远端绝对路径
-     */
-    public suspend fun push(
-        channel: ByteReadChannel,
-        remotePath: String,
-        totalSize: Long = -1L,
-        flags: Int = SyncFlags.FLAG_NONE,
-        onProgress: ((written: Long, total: Long) -> Unit)? = null
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            sync.pushV2(
-                channel = channel,
-                remotePath = remotePath,
-                totalSize = totalSize,
-                flags = flags,
-                onProgress = onProgress
-            )
-        }
-    }
+    // 文件传输 API（基础单文件 API & 增强版目录树 Landing Path API）
 
     /**
      * 推送 (Push) 单个本地文件到设备指定的远端绝对路径
@@ -440,37 +418,15 @@ public class AdbClient(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             require(localFile.exists() && localFile.isFile) { "推送源必须是存在的单文件: ${localFile.absolutePath}" }
-
-            // 使用 Ktor 3.x 官方原生的 InputStream.toByteReadChannel()
             localFile.inputStream().use { inputStream ->
-                val channel = inputStream.toByteReadChannel()
                 sync.pushV2(
-                    channel = channel,
+                    inputStream = inputStream,
                     remotePath = remotePath,
                     totalSize = localFile.length(),
                     flags = flags,
                     onProgress = onProgress
                 )
             }
-        }
-    }
-
-    /**
-     * 从设备远端绝对路径拉取 (Pull) 数据到指定的 ByteWriteChannel
-     */
-    public suspend fun pull(
-        remotePath: String,
-        channel: ByteWriteChannel,
-        flags: Int = SyncFlags.FLAG_NONE,
-        onProgress: ((read: Long, total: Long) -> Unit)? = null
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
-            sync.pullV2(
-                remotePath = remotePath,
-                channel = channel,
-                flags = flags,
-                onProgress = onProgress
-            )
         }
     }
 
@@ -484,34 +440,29 @@ public class AdbClient(
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
+            // 确保本地父级目录已自动创建
             localFile.parentFile?.mkdirs()
-
-            // 创建双向 ByteChannel（既是 ByteWriteChannel 也是 ByteReadChannel）
-            val channel = ByteChannel(autoFlush = true)
-
-            coroutineScope {
-                // 使用 Ktor 3.x 官方原生的 ByteReadChannel.copyTo(OutputStream)
-                val writeJob = launch {
-                    localFile.outputStream().use { outputStream ->
-                        channel.copyTo(outputStream)
-                    }
-                }
-
-                // sync.pullV2 将数据写入 channel (作为 ByteWriteChannel)
+            localFile.outputStream().use { outputStream ->
                 sync.pullV2(
                     remotePath = remotePath,
-                    channel = channel,
+                    outputStream = outputStream,
                     flags = flags,
                     onProgress = onProgress
                 )
-
-                writeJob.join()
             }
         }
     }
 
     /**
      * 增强 Push API：处理文件或目录树传输，并按标准 `adb push` 规范推算落地路径
+     *
+     * 1. 若 [local] 为单个文件：
+     *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，文件落地为 `remotePath/local.name`
+     *    - 否则文件落地为 `remotePath`
+     * 2. 若 [local] 为目录：
+     *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，远端基准目录为 `remotePath/local.name`
+     *    - 否则远端基准目录为 `remotePath`
+     *    - 自动通过 shell.exec 预先建好远端所有文件夹（支持空目录），再依次上传所有子文件
      */
     public suspend fun push(
         local: File,
@@ -538,6 +489,20 @@ public class AdbClient(
                     remotePath.trimEnd('/')
                 }
 
+                // 1. 优先预建立远端完整目录树（包括空目录）
+                val allDirs = local.walkTopDown().filter { it.isDirectory }.toList()
+                for (dir in allDirs) {
+                    val relativePath = dir.relativeTo(local).path.replace('\\', '/')
+                    val targetRemoteDir = if (relativePath.isEmpty()) {
+                        baseRemoteDir
+                    } else {
+                        "$baseRemoteDir/$relativePath"
+                    }
+                    // 调用 shell.exec 在远端建好目录节点
+                    shell.exec("mkdir -p \"${targetRemoteDir.replace("\"", "\\\"")}\"")
+                }
+
+                // 2. 收集所有子文件计算总字节数并依次传输
                 val allFiles = local.walkTopDown().filter { it.isFile }.toList()
                 val totalBytes = allFiles.sumOf { it.length() }
                 var accumulatedBytes = 0L
@@ -559,6 +524,14 @@ public class AdbClient(
     /**
      * 增强 Pull API：处理文件或目录树从设备拉取，并按标准 `adb pull` 规范推算落地路径
      * 包含防路径穿越 (Path Traversal / Zip Slip) 安全校验
+     *
+     * 1. 若 [remotePath] 为单文件：
+     *    - 当 [local] 为已存在目录或路径以分隔符结尾，落地文件为 `File(local, remoteFileName)`
+     *    - 否则落地文件为 `local`
+     * 2. 若 [remotePath] 为目录：
+     *    - 当 [local] 为已存在目录，本地基准目录为 `File(local, remoteDirName)`
+     *    - 否则本地基准目录为 `local`
+     *    - 递归扫描远端树结构，提前在本地重建所有目录（含空目录），再批量拉取文件
      */
     public suspend fun pull(
         remotePath: String,
@@ -584,10 +557,27 @@ public class AdbClient(
                     local
                 }
 
-                val remoteFiles = scanRemoteTree(remoteCleanPath)
+                // 1. 扫描远端全量节点（目录 + 文件）
+                val remoteNodes = scanRemoteTree(remoteCleanPath)
+                val remoteFiles = remoteNodes.filter { !it.isDirectory }
                 val totalBytes = remoteFiles.sumOf { it.size }
                 var accumulatedBytes = 0L
 
+                // 2. 提前在本地重建所有目录结构（包含空目录）
+                baseLocalDir.mkdirs()
+                for (dirNode in remoteNodes.filter { it.isDirectory }) {
+                    val targetLocalDir = File(baseLocalDir, dirNode.relativePath)
+
+                    // 路径穿越安全防护 (Zip Slip Protection)
+                    val canonicalDest = targetLocalDir.canonicalPath
+                    val canonicalBase = baseLocalDir.canonicalPath
+                    if (!canonicalDest.startsWith(canonicalBase)) {
+                        throw SecurityException("检测到非法路径穿越尝试: ${dirNode.relativePath}")
+                    }
+                    targetLocalDir.mkdirs()
+                }
+
+                // 3. 依次拉取各个文件
                 for (item in remoteFiles) {
                     val targetLocalFile = File(baseLocalDir, item.relativePath)
 
@@ -616,20 +606,22 @@ public class AdbClient(
         return runCatching {
             val stat = sync.statV2(remotePath)
             stat.exists && stat.isDirectory
-        }.getOrDefault(false)
+        }.getOrElse {
+            false
+        }
     }
 
     /**
-     * 递归扫描远端文件树
+     * 递归扫描远端文件树结构（兼顾文件与目录节点）
      */
     private suspend fun scanRemoteTree(
         baseRemoteDir: String,
         currentRelativeDir: String = "",
         depth: Int = 0
-    ): List<RemoteFileInfo> {
+    ): List<RemoteNodeInfo> {
         if (depth > 32) return emptyList()
 
-        val result = mutableListOf<RemoteFileInfo>()
+        val result = mutableListOf<RemoteNodeInfo>()
         val currentRemoteDir = if (currentRelativeDir.isEmpty()) {
             baseRemoteDir
         } else {
@@ -647,9 +639,11 @@ public class AdbClient(
             val fullRemotePath = "$baseRemoteDir/$relativePath"
 
             if (stat.isDirectory) {
+                // 记录目录节点本身（确保存在空目录时也能成功落地）
+                result.add(RemoteNodeInfo(fullRemotePath, relativePath, isDirectory = true, size = 0L))
                 result.addAll(scanRemoteTree(baseRemoteDir, relativePath, depth + 1))
             } else if (stat.isFile) {
-                result.add(RemoteFileInfo(fullRemotePath, relativePath, stat.size))
+                result.add(RemoteNodeInfo(fullRemotePath, relativePath, isDirectory = false, size = stat.size))
             }
         }
 

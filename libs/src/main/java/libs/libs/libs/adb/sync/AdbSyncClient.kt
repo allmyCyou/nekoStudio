@@ -2,12 +2,10 @@ package libs.libs.libs.adb.sync
 
 import libs.libs.libs.adb.connect.AdbConnection
 import libs.libs.libs.adb.connect.AdbStream
-import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.ByteWriteChannel
-import io.ktor.utils.io.readAvailable
-import io.ktor.utils.io.readFully
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -20,7 +18,7 @@ public open class AdbSyncClient(
 
     protected suspend fun openSyncStream(): AdbStream {
         return connection.openStream("sync:")
-            ?: throw IllegalStateException("Failed to open ADB sync service")
+            ?: throw IllegalStateException("Failed to open ADB sync: service")
     }
 
     protected suspend fun openSyncReader(): Pair<AdbStream, SyncStreamReader> {
@@ -41,11 +39,15 @@ public open class AdbSyncClient(
 
             stream.write(reqHeader + pathBytes)
 
+            // V1 STAT 响应总共 16 字节:
+            // [4 字节 "STAT"][4 字节 mode][4 字节 size][4 字节 mtime]
+            // parseHeader 读取前 8 字节: id="STAT", mode=value
             val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
             val (id, mode) = SyncCommand.parseHeader(respHeaderBytes)
 
             check(id == SyncCommand.ID_STAT) { "Unexpected STAT response tag: $id" }
 
+            // 剩余只需读取 8 字节 (size 4B + mtime 4B)
             val statBytes = reader.readExactBytes(8)
             val buf = ByteBuffer.wrap(statBytes).order(ByteOrder.LITTLE_ENDIAN)
 
@@ -72,6 +74,9 @@ public open class AdbSyncClient(
 
                 when (id) {
                     SyncCommand.ID_DENT -> {
+                        // V1 DENT 结构文件名之前共 20 字节:
+                        // [4 字节 "DENT"][4 字节 mode][4 字节 size][4 字节 mtime][4 字节 namelen]
+                        // headerBytes 已读取 8 字节(id + mode)，剩余只需读取 12 字节 (size + mtime + namelen)
                         val dentBytes = reader.readExactBytes(12)
                         val buf = ByteBuffer.wrap(dentBytes).order(ByteOrder.LITTLE_ENDIAN)
                         
@@ -101,7 +106,7 @@ public open class AdbSyncClient(
      * V1 Push (SEND)
      */
     public suspend fun push(
-        channel: ByteReadChannel,
+        inputStream: InputStream,
         remotePath: String,
         totalSize: Long = -1L,
         mode: Int = FilePermissions.DEFAULT_MODE,
@@ -120,7 +125,7 @@ public open class AdbSyncClient(
                 
                 var readTotal = 0
                 while (readTotal < expectedSize) {
-                    val read = channel.readAvailable(dataBuffer, readTotal, expectedSize - readTotal)
+                    val read = inputStream.read(dataBuffer, readTotal, expectedSize - readTotal)
                     if (read < 0) break
                     readTotal += read
                 }
@@ -153,10 +158,9 @@ public open class AdbSyncClient(
 
                 val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
                 var bytesWritten = 0L
+                var read: Int
 
-                while (!channel.isClosedForRead) {
-                    val read = channel.readAvailable(buffer, 0, buffer.size)
-                    if (read < 0) break
+                while (inputStream.read(buffer).also { read = it } != -1) {
                     if (read > 0) {
                         val dataHeader = SyncCommand.createHeader(SyncCommand.ID_DATA, read)
                         val payload = if (read == buffer.size) buffer else buffer.copyOf(read)
@@ -190,9 +194,10 @@ public open class AdbSyncClient(
      */
     public suspend fun pull(
         remotePath: String,
-        channel: ByteWriteChannel,
+        outputStream: OutputStream,
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
+        // 先查询 stat，确认文件存在后再开传输流，避免占用无用流
         val fileStat = stat(remotePath)
         check(fileStat.exists) { "Remote file does not exist: $remotePath" }
 
@@ -209,7 +214,7 @@ public open class AdbSyncClient(
 
                 when (id) {
                     SyncCommand.ID_DATA -> {
-                        reader.readToChannel(channel, len)
+                        reader.readToStream(outputStream, len)
                         bytesRead += len
                         onProgress?.invoke(bytesRead, fileStat.size)
                     }
@@ -221,7 +226,7 @@ public open class AdbSyncClient(
                     else -> throw IllegalStateException("Unexpected pull response tag: $id")
                 }
             }
-            channel.flush()
+            outputStream.flush()
         } finally {
             stream.close()
         }
