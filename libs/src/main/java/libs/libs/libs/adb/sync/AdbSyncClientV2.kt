@@ -171,7 +171,11 @@ public class AdbSyncClientV2(
             var v2Success = false
             val (stream, reader) = openSyncReader()
             try {
-                val requestBytes = SyncCommandV2.createSendRequestV2(mode, flags, remotePath)
+                val requestBytes = SyncCommandV2.createSendRequestV2(
+                    remotePath = remotePath,
+                    mode = mode,
+                    flags = flags
+                )
                 stream.write(requestBytes)
 
                 val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
@@ -230,7 +234,11 @@ public class AdbSyncClientV2(
                 var v2Success = false
                 val (stream, reader) = openSyncReader()
                 try {
-                    val requestBytes = SyncCommandV2.createSendRequestV2(0, flags, remotePath)
+                    val requestBytes = SyncCommandV2.createSendRequestV2(
+                        remotePath = remotePath,
+                        mode = 0,
+                        flags = flags
+                    )
                     stream.write(requestBytes)
 
                     var bytesRead = 0L
