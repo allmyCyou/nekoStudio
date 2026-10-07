@@ -573,6 +573,8 @@ public class AdbClient(
      * 判断远端路径是否为目录
      */
     private suspend fun isRemoteDirectory(remotePath: String): Boolean {
+        if (remotePath.endsWith("/")) return true
+
         return runCatching {
             val stat = sync.statV2(remotePath)
             stat.exists && stat.isDirectory
