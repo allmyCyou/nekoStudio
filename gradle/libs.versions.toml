@@ -16,6 +16,7 @@ android-buildTools-version = "37.0.0"
 cmake-version = "4.4.2"
 
 kotlinxCoroutines = "1.11.0"
+ktor = "3.6.0"
 annotation = "1.11.0"
 coreKtx = "1.19.1"
 collection = "1.6.0"
@@ -62,6 +63,8 @@ kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-cor
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxCoroutines" }
 kotlinx-serialization-protobuf = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-protobuf", version.ref = "kotlinxCoroutines" }
+
+kotlin-ktor = { group = "io.ktor", name = "ktor-utils", version.ref = "ktor" }
 
 lsposed-hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypassVersion" }
 

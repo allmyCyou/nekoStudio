@@ -1,10 +1,11 @@
 package libs.libs.libs.adb.sync
 
 import libs.libs.libs.adb.connect.AdbConnection
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.readAvailable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.InputStream
-import java.io.OutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -14,9 +15,6 @@ public class AdbSyncClientV2(
 
     private var isV2SupportedCache: Boolean? = null
 
-    /**
-     * 检查设备连接是否支持 Sync V2 协议
-     */
     public suspend fun isV2Supported(): Boolean {
         isV2SupportedCache?.let { return it }
         val supported = try {
@@ -42,9 +40,6 @@ public class AdbSyncClientV2(
         return supported
     }
 
-    /**
-     * V2 Stat (STA2)
-     */
     public suspend fun statV2(remotePath: String): FileStatV2 = withContext(Dispatchers.IO) {
         if (isV2Supported()) {
             val (stream, reader) = openSyncReader()
@@ -61,8 +56,6 @@ public class AdbSyncClientV2(
                 val (id, error) = SyncCommand.parseHeader(respHeader)
 
                 if (id == SyncCommandV2.ID_STA2 || id == SyncCommandV2.ID_LSTA) {
-                    // STA2 结构全长 72 字节 (4B id + 4B error + 64B stat payload)
-                    // respHeader 已读 8 字节 (id + error)，只需再读 64 字节
                     val remainingBytes = reader.readExactBytes(64)
                     
                     val fullPayload = ByteBuffer.allocate(68).order(ByteOrder.LITTLE_ENDIAN)
@@ -73,7 +66,6 @@ public class AdbSyncClientV2(
                     return@withContext fullPayload.parseSyncStatV2(remotePath)
                 }
             } catch (_: Exception) {
-                // 发生异常自动降级到 V1
             } finally {
                 stream.close()
             }
@@ -82,9 +74,6 @@ public class AdbSyncClientV2(
         stat(remotePath).toFileStatV2()
     }
 
-    /**
-     * V2 List (LST2)
-     */
     public suspend fun listV2(remotePath: String): List<FileStatV2> = withContext(Dispatchers.IO) {
         if (isV2Supported()) {
             val (stream, reader) = openSyncReader()
@@ -109,12 +98,8 @@ public class AdbSyncClientV2(
                         SyncCommandV2.ID_DNT2 -> {
                             isV2Valid = true
                             
-                            // AOSP DNT2 结构全长 76 字节 + 文件名:
-                            // [4B "DNT2"][4B error][64B stat payload][4B namelen][namelen 字节 name]
-                            // headerBytes 已读 8 字节(id + error)，还需读 68 字节(64B stat + 4B namelen)
                             val remainingBytes = reader.readExactBytes(68)
                             
-                            // 提取最后 4 字节的 namelen
                             val buf = ByteBuffer.wrap(remainingBytes).order(ByteOrder.LITTLE_ENDIAN)
                             val statPayloadBytes = ByteArray(64)
                             buf.get(statPayloadBytes)
@@ -144,13 +129,11 @@ public class AdbSyncClientV2(
 
                 if (isV2Valid) return@withContext entries
             } catch (_: Exception) {
-                // Fallback 到 V1
             } finally {
                 stream.close()
             }
         }
 
-        // Fallback 到 V1 List 并转换封装
         val v1Entries = list(remotePath)
         v1Entries.map { dent ->
             FileStatV2(
@@ -165,7 +148,7 @@ public class AdbSyncClientV2(
      * V2 Push (SND2)
      */
     public suspend fun pushV2(
-        inputStream: InputStream,
+        channel: ByteReadChannel,
         remotePath: String,
         totalSize: Long = -1L,
         mode: Int = FilePermissions.DEFAULT_MODE,
@@ -182,9 +165,10 @@ public class AdbSyncClientV2(
 
                 val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
                 var bytesWritten = 0L
-                var read: Int
 
-                while (inputStream.read(buffer).also { read = it } != -1) {
+                while (!channel.isClosedForRead) {
+                    val read = channel.readAvailable(buffer, 0, buffer.size)
+                    if (read < 0) break
                     if (read > 0) {
                         val dataHeader = SyncCommand.createHeader(SyncCommand.ID_DATA, read)
                         val payload = if (read == buffer.size) buffer else buffer.copyOf(read)
@@ -210,7 +194,6 @@ public class AdbSyncClientV2(
             } catch (e: IllegalStateException) {
                 throw e
             } catch (_: Exception) {
-                // 传输异常降级
             } finally {
                 stream.close()
             }
@@ -218,7 +201,7 @@ public class AdbSyncClientV2(
             if (v2Success) return@withContext
         }
 
-        push(inputStream, remotePath, totalSize, mode, mtime, onProgress)
+        push(channel, remotePath, totalSize, mode, mtime, onProgress)
     }
 
     /**
@@ -226,7 +209,7 @@ public class AdbSyncClientV2(
      */
     public suspend fun pullV2(
         remotePath: String,
-        outputStream: OutputStream,
+        channel: ByteWriteChannel,
         flags: Int = SyncFlags.FLAG_NONE,
         onProgress: ((read: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
@@ -249,7 +232,7 @@ public class AdbSyncClientV2(
                         when (id) {
                             SyncCommand.ID_DATA -> {
                                 isV2Valid = true
-                                reader.readToStream(outputStream, len)
+                                reader.readToChannel(channel, len)
                                 bytesRead += len
                                 onProgress?.invoke(bytesRead, fileStat.size)
                             }
@@ -264,7 +247,7 @@ public class AdbSyncClientV2(
                             else -> break
                         }
                     }
-                    outputStream.flush()
+                    channel.flush()
                 } catch (e: IllegalStateException) {
                     throw e
                 } catch (_: Exception) {
@@ -276,6 +259,6 @@ public class AdbSyncClientV2(
             }
         }
 
-        pull(remotePath, outputStream, onProgress)
+        pull(remotePath, channel, onProgress)
     }
 }
