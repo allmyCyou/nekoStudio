@@ -5,8 +5,9 @@ import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.ByteWriteChannel
+import io.ktor.utils.io.ByteChannel
 import io.ktor.utils.io.jvm.javaio.toByteReadChannel
-import io.ktor.utils.io.jvm.javaio.toByteWriteChannel
+import io.ktor.utils.io.jvm.javaio.copyTo
 import libs.libs.libs.adb.abb.AdbAbbClient
 import libs.libs.libs.adb.abb.AbbInstallOptions
 import libs.libs.libs.adb.abb.AbbUninstallOptions
@@ -25,6 +26,8 @@ import libs.libs.libs.adb.sync.AdbSyncClientV2
 import libs.libs.libs.adb.sync.SyncFlags
 import libs.libs.libs.adb.usb.accessory.AdbUsbAccessoryManager
 import libs.libs.libs.adb.usb.host.AdbUsbHostConnection
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.merge
@@ -437,6 +440,8 @@ public class AdbClient(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             require(localFile.exists() && localFile.isFile) { "推送源必须是存在的单文件: ${localFile.absolutePath}" }
+
+            // 使用 Ktor 3.x 官方原生的 InputStream.toByteReadChannel()
             localFile.inputStream().use { inputStream ->
                 val channel = inputStream.toByteReadChannel()
                 sync.pushV2(
@@ -480,14 +485,27 @@ public class AdbClient(
     ): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             localFile.parentFile?.mkdirs()
-            localFile.outputStream().use { outputStream ->
-                val channel = outputStream.toByteWriteChannel()
+
+            // 创建双向 ByteChannel（既是 ByteWriteChannel 也是 ByteReadChannel）
+            val channel = ByteChannel(autoFlush = true)
+
+            coroutineScope {
+                // 使用 Ktor 3.x 官方原生的 ByteReadChannel.copyTo(OutputStream)
+                val writeJob = launch {
+                    localFile.outputStream().use { outputStream ->
+                        channel.copyTo(outputStream)
+                    }
+                }
+
+                // sync.pullV2 将数据写入 channel (作为 ByteWriteChannel)
                 sync.pullV2(
                     remotePath = remotePath,
                     channel = channel,
                     flags = flags,
                     onProgress = onProgress
                 )
+
+                writeJob.join()
             }
         }
     }
