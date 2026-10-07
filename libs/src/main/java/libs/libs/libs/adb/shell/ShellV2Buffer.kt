@@ -4,15 +4,22 @@ package libs.libs.libs.adb.shell
  * 零 JVM 堆分配 Shell V2 解析缓冲区
  */
 public class ShellV2Buffer(initialCapacity: Int = 16 * 1024) {
-    private companion object {
-        private const val MAX_PAYLOAD_SIZE = 4 * 1024 * 1024
+    @PublishedApi
+    internal companion object {
+        @PublishedApi
+        internal const val MAX_PAYLOAD_SIZE: Int = 4 * 1024 * 1024
     }
 
-    private var buffer = ByteArray(initialCapacity)
-    private var head = 0
-    private var tail = 0
+    @PublishedApi
+    internal var buffer: ByteArray = ByteArray(initialCapacity)
 
-    val size: Int get() = tail - head
+    @PublishedApi
+    internal var head: Int = 0
+
+    @PublishedApi
+    internal var tail: Int = 0
+
+    public val size: Int get() = tail - head
 
     public fun append(data: ByteArray, offset: Int = 0, length: Int = data.size) {
         ensureCapacity(length)

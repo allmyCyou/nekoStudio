@@ -252,10 +252,11 @@ public class AdbShellClient(
 
     /**
      * 零堆分配读循环（Shell 协议解析层）
+     * 注意：去掉了 onPacket 的 crossinline 限制，允许在 lambda 内直接调用 emit 等 suspend 函数
      */
     private suspend inline fun readShellV2StreamZeroAlloc(
         stream: AdbStream,
-        crossinline onPacket: (id: Int, buffer: ByteArray, offset: Int, length: Int) -> Unit
+        onPacket: (id: Int, buffer: ByteArray, offset: Int, length: Int) -> Unit
     ) {
         val buffer = threadLocalBuffer.get()
         buffer.reset()
