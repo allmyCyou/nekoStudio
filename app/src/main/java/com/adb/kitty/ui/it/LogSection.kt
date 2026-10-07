@@ -52,11 +52,6 @@ class LogTextView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : TextView(context, attrs, defStyleAttr) {
 
-    init {
-        // 关闭不必要的绘制计算
-        setIncludeFontPadding(false)
-    }
-
     override fun sendAccessibilityEventUnchecked(event: AccessibilityEvent?) {
         if (event?.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
             event?.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
@@ -76,7 +71,9 @@ class LogTextView @JvmOverloads constructor(
     }
 }
 
-// 改为安全读取 UTF-8 字节并转为 String
+/**
+ * 安全读取 Native UTF-8 字节并转为标准 JVM String
+ */
 fun getNativeLogSnapshot(): String {
     val buffer = NativeLibs.getDirectBuffer() ?: return ""
     val writeOffset = NativeLibs.getWriteOffset().toInt().coerceAtMost(buffer.capacity())
@@ -87,7 +84,6 @@ fun getNativeLogSnapshot(): String {
     duplicate.position(0)
     duplicate.get(bytes, 0, writeOffset)
     
-    // 一次性转为标准 UTF-8 字符串，确保 UTF-16 字符排版引擎高效工作
     return String(bytes, Charsets.UTF_8)
 }
 
@@ -128,24 +124,26 @@ private class LogContainerView(context: Context) : NestedScrollView(context) {
 
             setOnLongClickListener { v ->
                 val tv = v as TextView
+                
+                // 确保文本 Buffer 转换为可变的 Spannable 类型，防止 Editor 强转失败
+                if (tv.text !is Spannable) {
+                    tv.setText(tv.text, TextView.BufferType.SPANNABLE)
+                }
 
-                // 开启选中支持并请求焦点
                 tv.setTextIsSelectable(true)
                 tv.requestFocus()
 
-                // 监听系统复制/全选菜单销毁事件，离开选中状态时还原为不可选中
                 tv.customSelectionActionModeCallback = object : ActionMode.Callback {
                     override fun onCreateActionMode(mode: ActionMode?, menu: Menu?): Boolean = true
                     override fun onPrepareActionMode(mode: ActionMode?, menu: Menu?): Boolean = false
                     override fun onActionItemClicked(mode: ActionMode?, item: MenuItem?): Boolean = false
 
                     override fun onDestroyActionMode(mode: ActionMode?) {
-                        // 结束复制操作或取消选择后重置
+                        // 离开选择状态时恢复为不可选中
                         tv.setTextIsSelectable(false)
                     }
                 }
 
-                // 返回 false 允许 TextView 内部继续响应 performLongClick 弹出选择游标
                 false
             }
         }
@@ -217,7 +215,8 @@ private class LogContainerView(context: Context) : NestedScrollView(context) {
                 }
             }
 
-            textView.setText(logCharSequence, TextView.BufferType.NORMAL)
+            // 使用 BufferType.SPANNABLE，确保 Editor.onDestroyActionMode 内部可以正确转换
+            textView.setText(logCharSequence, TextView.BufferType.SPANNABLE)
         }
     }
 

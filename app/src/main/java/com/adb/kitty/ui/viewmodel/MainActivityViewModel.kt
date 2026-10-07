@@ -135,34 +135,13 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             }
         }
 
-        // 减少 _uiUpdateVersion 的频繁触发，改用批处理或定时通知
-        viewModelScope.launch(Dispatchers.Default) {
-            var hasPendingUpdate = false
-
-            // 开启定时刷盘协程，避免每行 updateVersion++
-            launch {
-                while (isActive) {
-                    delay(100)
-                    if (hasPendingUpdate) {
-                        _uiUpdateVersion.value++
-                        hasPendingUpdate = false
-                    }
-                }
-            }
-
-            for (msg in logInputChannel) {
-                processAndPushLog(msg)
-                hasPendingUpdate = true
-            }
-        }
-/*
         // 2. 异步消费数据通道：格式化时间戳并推入 C++ 堆外内存
         viewModelScope.launch(Dispatchers.Default) {
             for (msg in logInputChannel) {
                 processAndPushLog(msg)
                 _uiUpdateVersion.value++
             }
-        }  */
+        }
     }
 
     /**
