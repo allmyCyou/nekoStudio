@@ -1,25 +1,34 @@
 package libs.libs.libs.adb.shell
 
-public class ShellV2Buffer {
+/**
+ * 零 JVM 堆分配 Shell V2 解析缓冲区
+ */
+public class ShellV2Buffer(initialCapacity: Int = 16 * 1024) {
     private companion object {
-        // 单个 ADB Shell V2 帧 Payload 最大安全上限（规范通常 <= 256KB，设为 4MB 防止意外）
         private const val MAX_PAYLOAD_SIZE = 4 * 1024 * 1024
     }
 
-    private var buffer = ByteArray(8192)
+    private var buffer = ByteArray(initialCapacity)
     private var head = 0
     private var tail = 0
 
     val size: Int get() = tail - head
 
-    public fun append(data: ByteArray) {
-        ensureCapacity(data.size)
-        System.arraycopy(data, 0, buffer, tail, data.size)
-        tail += data.size
+    public fun append(data: ByteArray, offset: Int = 0, length: Int = data.size) {
+        ensureCapacity(length)
+        System.arraycopy(data, offset, buffer, tail, length)
+        tail += length
     }
 
-    public fun pollPacket(): ShellV2Packet? {
-        if (size < ShellV2Packet.HEADER_SIZE) return null
+    /**
+     * 零堆分配解包：通过函数内联 + 传递 (buffer, offset, length)
+     * 1. 绝不调用 copyOfRange
+     * 2. 绝不创建 ShellV2Packet 对象
+     */
+    public inline fun pollPacket(
+        onPacket: (id: Int, buffer: ByteArray, offset: Int, length: Int) -> Unit
+    ): Boolean {
+        if (size < ShellV2Packet.HEADER_SIZE) return false
 
         val id = buffer[head].toInt() and 0xFF
         val len = (buffer[head + 1].toInt() and 0xFF) or
@@ -27,23 +36,31 @@ public class ShellV2Buffer {
                 ((buffer[head + 3].toInt() and 0xFF) shl 16) or
                 ((buffer[head + 4].toInt() and 0xFF) shl 24)
 
-        require(len in 0..MAX_PAYLOAD_SIZE) { "Invalid or oversized shell v2 payload size: $len" }
+        require(len in 0..MAX_PAYLOAD_SIZE) { "Invalid shell v2 payload size: $len" }
 
         val totalSize = ShellV2Packet.HEADER_SIZE + len
-        if (size < totalSize) return null
+        if (size < totalSize) return false
 
         require(id == ShellV2Packet.ID_STDOUT || id == ShellV2Packet.ID_STDERR || id == ShellV2Packet.ID_EXIT) {
-            "Invalid device-to-host shell packet id: $id"
+            "Invalid shell packet id: $id"
         }
 
-        val payload = buffer.copyOfRange(head + ShellV2Packet.HEADER_SIZE, head + totalSize)
-        head += totalSize
+        val payloadOffset = head + ShellV2Packet.HEADER_SIZE
 
+        // 零分配回调：直接将内部数组引用和指针暴露给消费端
+        onPacket(id, buffer, payloadOffset, len)
+
+        head += totalSize
         if (head == tail) {
             head = 0
             tail = 0
         }
-        return ShellV2Packet(id, payload)
+        return true
+    }
+
+    public fun reset() {
+        head = 0
+        tail = 0
     }
 
     private fun ensureCapacity(needed: Int) {

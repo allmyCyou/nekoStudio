@@ -25,6 +25,9 @@ public class AdbShellClient(
     // 维护当前正在运行的所有 Shell 活跃流映射 (sessionId -> AdbStream)
     private val activeStreams = ConcurrentHashMap<Long, AdbStream>()
 
+    // ThreadLocal 复用 ShellV2Buffer，避免每次调用都 new Buffer
+    private val threadLocalBuffer = ThreadLocal.withInitial { ShellV2Buffer(16 * 1024) }
+
     /**
      * 主动根据 sessionId 关闭指定 Shell 持续流（如终止某个 logcat）
      * 内部通过调用 [AdbStream.close] 向设备端发送 ADB CLSE 报文，终止远端进程
@@ -73,15 +76,18 @@ public class AdbShellClient(
                 activeStreams[sessionId] = v2Stream
                 var emittedAny = false
                 try {
-                    readShellV2Stream(v2Stream) { packet ->
-                        when (packet.id) {
+                    readShellV2StreamZeroAlloc(v2Stream) { id, buffer, offset, length ->
+                        when (id) {
                             ShellV2Packet.ID_STDOUT -> {
                                 emittedAny = true
-                                emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
+                                // 拷贝当前 Chunk 切片交给 Flow 下游消费（Buffer 内部数组会在后续读取中被覆写）
+                                val payload = buffer.copyOfRange(offset, offset + length)
+                                emit(ShellStreamChunk(ShellStreamType.STDOUT, payload))
                             }
                             ShellV2Packet.ID_STDERR -> {
                                 emittedAny = true
-                                emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
+                                val payload = buffer.copyOfRange(offset, offset + length)
+                                emit(ShellStreamChunk(ShellStreamType.STDERR, payload))
                             }
                             ShellV2Packet.ID_EXIT -> emittedAny = true
                         }
@@ -157,13 +163,13 @@ public class AdbShellClient(
                 val stderrStream = BoundedOutputStream(maxOutputSize)
                 var exitCode = -1
 
-                readShellV2Stream(stream) { packet ->
-                    when (packet.id) {
-                        ShellV2Packet.ID_STDOUT -> stdoutStream.write(packet.payload)
-                        ShellV2Packet.ID_STDERR -> stderrStream.write(packet.payload)
+                readShellV2StreamZeroAlloc(stream) { id, buf, offset, length ->
+                    when (id) {
+                        ShellV2Packet.ID_STDOUT -> stdoutStream.write(buf, offset, length)
+                        ShellV2Packet.ID_STDERR -> stderrStream.write(buf, offset, length)
                         ShellV2Packet.ID_EXIT -> {
-                            if (packet.payload.isNotEmpty()) {
-                                exitCode = packet.payload[0].toUByte().toInt()
+                            if (length > 0) {
+                                exitCode = buf[offset].toInt() and 0xFF
                             }
                         }
                     }
@@ -244,21 +250,41 @@ public class AdbShellClient(
         }
     }
 
-    private suspend inline fun readShellV2Stream(
+    /**
+     * 零堆分配读循环（Shell 协议解析层）
+     */
+    private suspend inline fun readShellV2StreamZeroAlloc(
         stream: AdbStream,
-        crossinline onPacket: suspend (ShellV2Packet) -> Unit
+        crossinline onPacket: (id: Int, buffer: ByteArray, offset: Int, length: Int) -> Unit
     ) {
-        val buffer = ShellV2Buffer()
-        while (true) {
-            val data = stream.read() ?: break
-            if (data.isNotEmpty()) {
-                buffer.append(data)
-                while (true) {
-                    val packet = buffer.pollPacket() ?: break
-                    onPacket(packet)
-                    if (packet.id == ShellV2Packet.ID_EXIT) return
+        val buffer = threadLocalBuffer.get()
+        buffer.reset()
+
+        try {
+            while (true) {
+                val data = stream.read() ?: break
+                if (data.isNotEmpty()) {
+                    buffer.append(data)
+                    while (true) {
+                        var hasPacket = false
+                        var isExit = false
+
+                        // 零拷贝指针解析
+                        buffer.pollPacket { id, buf, offset, length ->
+                            hasPacket = true
+                            if (id == ShellV2Packet.ID_EXIT) {
+                                isExit = true
+                            }
+                            onPacket(id, buf, offset, length)
+                        }
+
+                        if (isExit) return
+                        if (!hasPacket) break
+                    }
                 }
             }
+        } finally {
+            buffer.reset()
         }
     }
 }
