@@ -405,7 +405,7 @@ public class AdbClient(
         options: AbbUninstallOptions = AbbUninstallOptions()
     ): Result<Unit> = abb.uninstall(packageName, options)
 
-    // 文件传输 API（基础单文件 API & 增强版目录树 Landing Path API）
+    // 文件传输 API（基础单文件 API & 增强版目录树 Landing Path API
 
     /**
      * 推送 (Push) 单个本地文件到设备指定的远端绝对路径
