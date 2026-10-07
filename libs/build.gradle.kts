@@ -96,5 +96,5 @@ dependencies {
     implementation(libs.androidx.annotation.experimental)
     implementation(libs.bcprov.jdk18on)
     implementation(libs.bcpkix.jdk18on)
-    implementation(libs.kotlin.ktor)
+    implementation(libs.bundles.kotlin.ktor)
 }

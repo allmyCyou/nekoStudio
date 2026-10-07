@@ -64,7 +64,8 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxCoroutines" }
 kotlinx-serialization-protobuf = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-protobuf", version.ref = "kotlinxCoroutines" }
 
-kotlin-ktor = { group = "io.ktor", name = "ktor-utils", version.ref = "ktor" }
+kotlin-ktor-utils = { group = "io.ktor", name = "ktor-utils", version.ref = "ktor" }
+kotlin-ktor-io = { group = "io.ktor", name = "ktor-io", version.ref = "ktor" }
 
 lsposed-hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypassVersion" }
 
@@ -136,6 +137,10 @@ kotlinx-android = [
     "kotlinx-coroutines-android",
     "kotlinx-serialization-json",
     "kotlinx-serialization-protobuf"
+]
+kotlin-ktor = [
+    "kotlin-ktor-io",
+    "kotlin-ktor-utils"
 ]
 libsu = [
     "libsu-core",

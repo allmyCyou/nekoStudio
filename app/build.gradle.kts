@@ -165,7 +165,7 @@ dependencies {
     implementation(projects.libs)
     coreLibraryDesugaring(libs.android.jdk.libs)
     runtimeOnly(libs.bundles.kotlinx.android)
-    runtimeOnly(libs.kotlin.ktor)
+    runtimeOnly(libs.bundles.kotlin.ktor)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.collection)
