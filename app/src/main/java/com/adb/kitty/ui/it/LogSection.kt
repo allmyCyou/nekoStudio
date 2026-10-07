@@ -13,6 +13,9 @@ import android.content.Context
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.util.AttributeSet
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -49,6 +52,11 @@ class LogTextView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : TextView(context, attrs, defStyleAttr) {
 
+    init {
+        // 关闭不必要的绘制计算
+        setIncludeFontPadding(false)
+    }
+
     override fun sendAccessibilityEventUnchecked(event: AccessibilityEvent?) {
         if (event?.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
             event?.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
@@ -68,34 +76,19 @@ class LogTextView @JvmOverloads constructor(
     }
 }
 
-/**
- * 包装 DirectByteBuffer 的 CharSequence 视图
- * 直接读取 Native 堆外内存，零 JVM 堆内存分配 (Zero-GC)
- */
-class DirectBufferCharSequence(
-    private val byteBuffer: ByteBuffer,
-    private val lengthInBytes: Int
-) : CharSequence {
+// 改为安全读取 UTF-8 字节并转为 String
+fun getNativeLogSnapshot(): String {
+    val buffer = NativeLibs.getDirectBuffer() ?: return ""
+    val writeOffset = NativeLibs.getWriteOffset().toInt().coerceAtMost(buffer.capacity())
+    if (writeOffset <= 0) return ""
 
-    override val length: Int get() = lengthInBytes
-
-    override fun get(index: Int): Char {
-        return (byteBuffer.get(index).toInt() and 0xFF).toChar()
-    }
-
-    override fun subSequence(startIndex: Int, endIndex: Int): CharSequence {
-        val subBuffer = byteBuffer.duplicate()
-        subBuffer.position(startIndex)
-        subBuffer.limit(endIndex)
-        return DirectBufferCharSequence(subBuffer.slice(), endIndex - startIndex)
-    }
-
-    override fun toString(): String {
-        val bytes = ByteArray(lengthInBytes)
-        val dup = byteBuffer.duplicate()
-        dup.get(bytes, 0, lengthInBytes)
-        return String(bytes, Charsets.UTF_8)
-    }
+    val bytes = ByteArray(writeOffset)
+    val duplicate = buffer.duplicate()
+    duplicate.position(0)
+    duplicate.get(bytes, 0, writeOffset)
+    
+    // 一次性转为标准 UTF-8 字符串，确保 UTF-16 字符排版引擎高效工作
+    return String(bytes, Charsets.UTF_8)
 }
 
 @Keep
@@ -129,9 +122,32 @@ private class LogContainerView(context: Context) : NestedScrollView(context) {
             typeface = Typeface.MONOSPACE
             textSize = 12f
             setPadding(16, 16, 16, 16)
-            setTextIsSelectable(true)
+            setTextIsSelectable(false)
             setHorizontallyScrolling(true)
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+
+            setOnLongClickListener { v ->
+                val tv = v as TextView
+
+                // 开启选中支持并请求焦点
+                tv.setTextIsSelectable(true)
+                tv.requestFocus()
+
+                // 监听系统复制/全选菜单销毁事件，离开选中状态时还原为不可选中
+                tv.customSelectionActionModeCallback = object : ActionMode.Callback {
+                    override fun onCreateActionMode(mode: ActionMode?, menu: Menu?): Boolean = true
+                    override fun onPrepareActionMode(mode: ActionMode?, menu: Menu?): Boolean = false
+                    override fun onActionItemClicked(mode: ActionMode?, item: MenuItem?): Boolean = false
+
+                    override fun onDestroyActionMode(mode: ActionMode?) {
+                        // 结束复制操作或取消选择后重置
+                        tv.setTextIsSelectable(false)
+                    }
+                }
+
+                // 返回 false 允许 TextView 内部继续响应 performLongClick 弹出选择游标
+                false
+            }
         }
 
         horizontalScrollView.addView(textView)
@@ -257,25 +273,14 @@ fun LogSection(
             uiUpdateVersionFlow
                 .sample(100.milliseconds)
                 .collect {
-                    val directBuffer = NativeLibs.getDirectBuffer()
-                    val writeOffset = NativeLibs.getWriteOffset().toInt()
-
-                    if (directBuffer == null || writeOffset <= 0) {
-                        withContext(Dispatchers.Main) {
-                            view.updateLogs("", logTextColor)
-                        }
-                        return@collect
+                    // 在后台线程安全提取快照并解码 UTF-8
+                    val logText = withContext(Dispatchers.Default) {
+                        getNativeLogSnapshot()
                     }
 
-                    val nativeCharSequence = withContext(Dispatchers.Default) {
-                        val duplicateBuffer = directBuffer.duplicate()
-                        duplicateBuffer.position(0)
-                        duplicateBuffer.limit(writeOffset)
-                        DirectBufferCharSequence(duplicateBuffer, writeOffset)
-                    }
-
+                    // 主线程仅负责设置合法文本
                     withContext(Dispatchers.Main) {
-                        view.updateLogs(nativeCharSequence, logTextColor)
+                        view.updateLogs(logText, logTextColor)
                     }
                 }
         }
