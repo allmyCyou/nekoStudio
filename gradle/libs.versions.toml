@@ -9,7 +9,7 @@ android-minSdk = "24"
 android-targetSdk = "37"
 
 android-versionCode = "30"
-android-versionPrefix = "4.8"
+android-versionPrefix = "4.9"
 
 android-ndk-version = "30.0.16248370"
 android-buildTools-version = "37.0.0"

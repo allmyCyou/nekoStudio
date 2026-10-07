@@ -1,6 +1,11 @@
 package libs.libs.libs.adb.shell
 
 public class ShellV2Buffer {
+    private companion object {
+        // 单个 ADB Shell V2 帧 Payload 最大安全上限（规范通常 <= 256KB，设为 4MB 防止意外）
+        private const val MAX_PAYLOAD_SIZE = 4 * 1024 * 1024
+    }
+
     private var buffer = ByteArray(8192)
     private var head = 0
     private var tail = 0
@@ -22,7 +27,7 @@ public class ShellV2Buffer {
                 ((buffer[head + 3].toInt() and 0xFF) shl 16) or
                 ((buffer[head + 4].toInt() and 0xFF) shl 24)
 
-        require(len >= 0) { "Invalid shell v2 payload size: $len" }
+        require(len in 0..MAX_PAYLOAD_SIZE) { "Invalid or oversized shell v2 payload size: $len" }
 
         val totalSize = ShellV2Packet.HEADER_SIZE + len
         if (size < totalSize) return null
