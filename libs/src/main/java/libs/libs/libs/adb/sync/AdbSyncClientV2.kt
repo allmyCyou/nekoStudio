@@ -156,7 +156,7 @@ public class AdbSyncClientV2(
     }
 
     /**
-     * V2 Push (SND2)
+     * 执行纯正的 ADB Sync V2 Push (SND2)
      */
     public suspend fun pushV2(
         inputStream: InputStream,
@@ -167,56 +167,55 @@ public class AdbSyncClientV2(
         mtime: Long = System.currentTimeMillis() / 1000,
         onProgress: ((written: Long, total: Long) -> Unit)? = null
     ): Unit = withContext(Dispatchers.IO) {
-        if (isV2Supported()) {
-            var v2Success = false
-            val (stream, reader) = openSyncReader()
-            try {
-                val requestBytes = SyncCommandV2.createSendRequestV2(
-                    remotePath = remotePath,
-                    mode = mode,
-                    flags = flags
-                )
-                stream.write(requestBytes)
+        val (stream, reader) = openSyncReader()
+        try {
+            // 1. 发送 SND2 12字节 Header + 路径
+            val requestBytes = SyncCommandV2.createSendRequestV2(remotePath, mode, flags)
+            stream.write(requestBytes)
 
-                val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
-                var bytesWritten = 0L
-                var read: Int
+            // 2. 循环推送数据块 (使用 12 字节的 V2 DATA Header)
+            val buffer = ByteArray(MAX_SYNC_DATA_SIZE)
+            var bytesWritten = 0L
+            var read: Int
 
-                while (inputStream.read(buffer).also { read = it } != -1) {
-                    if (read > 0) {
-                        val dataHeader = SyncCommand.createHeader(SyncCommand.ID_DATA, read)
-                        val payload = if (read == buffer.size) buffer else buffer.copyOf(read)
+            while (inputStream.read(buffer).also { read = it } != -1) {
+                if (read > 0) {
+                    // V2 标准 DATA 包头: [DATA][flags][size]
+                    val dataHeaderV2 = SyncCommandV2.createDataHeaderV2(read, flags)
+                    
+                    // 分开写入，避免内存复制与GC开销
+                    stream.write(dataHeaderV2)
+                    stream.write(buffer, 0, read)
 
-                        stream.write(dataHeader + payload)
-                        bytesWritten += read
-                        onProgress?.invoke(bytesWritten, totalSize)
-                    }
+                    bytesWritten += read
+                    onProgress?.invoke(bytesWritten, totalSize)
                 }
-
-                val doneHeader = SyncCommand.createHeader(SyncCommand.ID_DONE, sanitizeMtime(mtime))
-                stream.write(doneHeader)
-
-                val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
-                val (id, len) = SyncCommand.parseHeader(respHeaderBytes)
-
-                if (id == SyncCommand.ID_OKAY) {
-                    v2Success = true
-                } else if (id == SyncCommand.ID_FAIL) {
-                    val errorMsg = String(reader.readExactBytes(len), Charsets.UTF_8)
-                    throw IllegalStateException("Push V2 (SND2) failed: $errorMsg")
-                }
-            } catch (e: IllegalStateException) {
-                throw e
-            } catch (_: Exception) {
-                // 传输异常降级
-            } finally {
-                stream.close()
             }
 
-            if (v2Success) return@withContext
-        }
+            // 3. 发送 V2 DONE 包头: [DONE][flags][mtime]
+            val doneHeaderV2 = SyncCommandV2.createDoneHeaderV2(mtime, flags)
+            stream.write(doneHeaderV2)
+            stream.flush()
 
-        push(inputStream, remotePath, totalSize, mode, mtime, onProgress)
+            // 4. 读取 adbd 服务端最终响应 Header (8 字节: [ID][len])
+            val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
+            val (id, len) = SyncCommand.parseHeader(respHeaderBytes)
+
+            when (id) {
+                SyncCommand.ID_OKAY -> {
+                    // 传输成功
+                }
+                SyncCommand.ID_FAIL -> {
+                    val errorMsg = reader.readString(len)
+                    throw IOException("Adbd V2 Push FAIL: $errorMsg")
+                }
+                else -> {
+                    throw IOException("Unexpected V2 response: id=$id, length=$len")
+                }
+            }
+        } finally {
+            runCatching { stream.close() }
+        }
     }
 
     /**

@@ -31,13 +31,13 @@ public object SyncCommandV2 {
     }
 
     /**
-     * 构建 SND2 (Push V2) 请求数据包
+     * 构建 SND2 (Push V2) 请求头
      * 格式: [4B "SND2"][4B flags][4B path_len][path_len 字节 "$remotePath,$mode"]
      */
     public fun createSendRequestV2(
         remotePath: String,
         mode: Int,
-        flags: Int
+        flags: Int = SyncFlags.FLAG_NONE
     ): ByteArray {
         val destinationStr = "$remotePath,$mode"
         val pathBytes = destinationStr.toByteArray(Charsets.UTF_8)
@@ -45,10 +45,40 @@ public object SyncCommandV2 {
             .order(ByteOrder.LITTLE_ENDIAN)
 
         buffer.put(ID_SND2.toByteArray(Charsets.US_ASCII)) // 0..3 : "SND2"
-        buffer.putInt(flags)                                // 4..7 : flags
-        buffer.putInt(pathBytes.size)                       // 8..11: path_len
+        buffer.putInt(flags)                                // 4..7 : flags (4B)
+        buffer.putInt(pathBytes.size)                       // 8..11: path_len (4B)
         buffer.put(pathBytes)                               // 12.. : "$remotePath,$mode"
 
+        return buffer.array()
+    }
+
+    /**
+     * 构建 Sync V2 数据块包头 (12 字节)
+     * 格式: [4B "DATA"][4B flags][4B chunk_size]
+     */
+    public fun createDataHeaderV2(
+        size: Int,
+        flags: Int = SyncFlags.FLAG_NONE
+    ): ByteArray {
+        val buffer = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.put(SyncCommand.ID_DATA.toByteArray(Charsets.US_ASCII)) // 0..3 : "DATA"
+        buffer.putInt(flags)                                            // 4..7 : flags (4B)
+        buffer.putInt(size)                                             // 8..11: chunk_size (4B)
+        return buffer.array()
+    }
+
+    /**
+     * 构建 Sync V2 完成包头 (12 字节)
+     * 格式: [4B "DONE"][4B flags][4B mtime]
+     */
+    public fun createDoneHeaderV2(
+        mtime: Long,
+        flags: Int = SyncFlags.FLAG_NONE
+    ): ByteArray {
+        val buffer = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.put(SyncCommand.ID_DONE.toByteArray(Charsets.US_ASCII)) // 0..3 : "DONE"
+        buffer.putInt(flags)                                            // 4..7 : flags (4B)
+        buffer.putInt(mtime.toInt())                                    // 8..11: mtime (4B)
         return buffer.array()
     }
 
