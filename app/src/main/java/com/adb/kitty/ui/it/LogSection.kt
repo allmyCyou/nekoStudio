@@ -141,7 +141,9 @@ private class LogContainerView(context: Context) : NestedScrollView(context) {
 
                     override fun onDestroyActionMode(mode: ActionMode?) {
                         // 离开选择状态时恢复为不可选中
-                        tv.setTextIsSelectable(false)
+                        tv.post {
+                            tv.setTextIsSelectable(false)
+                        }
                     }
                 }
 
