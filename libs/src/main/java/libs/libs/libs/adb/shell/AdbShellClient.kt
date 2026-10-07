@@ -221,7 +221,9 @@ public class AdbShellClient(
                 val outputStream = BoundedOutputStream(maxOutputSize)
                 while (true) {
                     val data = stream.read() ?: break
-                    if (data.isNotEmpty()) outputStream.write(data)
+                    if (data.isNotEmpty()) {
+                        outputStream.write(data, 0, data.size)
+                    }
                 }
 
                 val rawOutput = outputStream.toStringUtf8()
@@ -252,7 +254,6 @@ public class AdbShellClient(
 
     /**
      * 零堆分配读循环（Shell 协议解析层）
-     * 注意：去掉了 onPacket 的 crossinline 限制，允许在 lambda 内直接调用 emit 等 suspend 函数
      */
     private suspend inline fun readShellV2StreamZeroAlloc(
         stream: AdbStream,
