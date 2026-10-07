@@ -13,7 +13,7 @@ public object SyncCommandV2 {
 
     /**
      * 构建 STA2 (Stat V2) / LST2 (List V2) 请求数据包
-     * 报文格式: [4B ID][4B path_len][path_len 字节 remotePath]
+     * 格式: [4B ID][4B path_len][path_len 字节 remotePath]
      */
     public fun createStatOrListRequestV2(
         id: String,
@@ -32,49 +32,46 @@ public object SyncCommandV2 {
 
     /**
      * 构建 SND2 (Push V2) 请求数据包
-     * 报文格式: [4B "SND2"][4B path_len][path_len 字节 remotePath][4B mode][4B flags]
+     * 格式: [4B "SND2"][4B flags][4B path_len][path_len 字节 "$remotePath,$mode"]
      */
     public fun createSendRequestV2(
         remotePath: String,
         mode: Int,
         flags: Int
     ): ByteArray {
-        val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
-        val buffer = ByteBuffer.allocate(SyncCommand.HEADER_SIZE + pathBytes.size + 8)
+        val destinationStr = "$remotePath,$mode"
+        val pathBytes = destinationStr.toByteArray(Charsets.UTF_8)
+        val buffer = ByteBuffer.allocate(12 + pathBytes.size)
             .order(ByteOrder.LITTLE_ENDIAN)
 
         buffer.put(ID_SND2.toByteArray(Charsets.US_ASCII)) // 0..3 : "SND2"
-        buffer.putInt(pathBytes.size)                       // 4..7 : path_len
-        buffer.put(pathBytes)                               // 8..  : remotePath
-        buffer.putInt(mode)                                 // mode (4B)
-        buffer.putInt(flags)                                // flags (4B)
+        buffer.putInt(flags)                                // 4..7 : flags
+        buffer.putInt(pathBytes.size)                       // 8..11: path_len
+        buffer.put(pathBytes)                               // 12.. : "$remotePath,$mode"
 
         return buffer.array()
     }
 
     /**
      * 构建 RCV2 (Pull V2) 请求数据包
-     * 报文格式: [4B "RCV2"][4B path_len][path_len 字节 remotePath][4B flags]
+     * 格式: [4B "RCV2"][4B flags][4B path_len][path_len 字节 remotePath]
      */
     public fun createRecvRequestV2(
         remotePath: String,
         flags: Int
     ): ByteArray {
         val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
-        val buffer = ByteBuffer.allocate(SyncCommand.HEADER_SIZE + pathBytes.size + 4)
+        val buffer = ByteBuffer.allocate(12 + pathBytes.size)
             .order(ByteOrder.LITTLE_ENDIAN)
 
         buffer.put(ID_RCV2.toByteArray(Charsets.US_ASCII)) // 0..3 : "RCV2"
-        buffer.putInt(pathBytes.size)                       // 4..7 : path_len
-        buffer.put(pathBytes)                               // 8..  : remotePath
-        buffer.putInt(flags)                                // flags (4B)
+        buffer.putInt(flags)                                // 4..7 : flags
+        buffer.putInt(pathBytes.size)                       // 8..11: path_len
+        buffer.put(pathBytes)                               // 12.. : remotePath
 
         return buffer.array()
     }
 
-    /**
-     * 兼容性路由方法
-     */
     public fun createRequestV2(
         id: String,
         mode: Int,
