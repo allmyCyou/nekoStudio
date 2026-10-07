@@ -195,7 +195,6 @@ public class AdbSyncClientV2(
             // 3. 发送 V2 DONE 包头: [DONE][flags][mtime]
             val doneHeaderV2 = SyncCommandV2.createDoneHeaderV2(mtime, flags)
             stream.write(doneHeaderV2)
-            stream.flush()
 
             // 4. 读取 adbd 服务端最终响应 Header (8 字节: [ID][len])
             val respHeaderBytes = reader.readExactBytes(SyncCommand.HEADER_SIZE)
