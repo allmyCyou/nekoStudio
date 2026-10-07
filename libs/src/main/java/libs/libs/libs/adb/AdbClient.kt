@@ -576,7 +576,7 @@ public class AdbClient(
         return runCatching {
             val stat = sync.statV2(remotePath)
             stat.exists && stat.isDirectory
-        }.getOrDefault(false)
+        }.getOrElse(false)
     }
 
     /**

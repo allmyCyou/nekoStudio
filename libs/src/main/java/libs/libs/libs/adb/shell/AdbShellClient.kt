@@ -16,7 +16,7 @@ public class AdbShellClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
     public companion object {
-        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 64 * 1024
+        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 16 * 1024
         public const val DEFAULT_TIMEOUT_MS: Long = 15_000L
     }
 
