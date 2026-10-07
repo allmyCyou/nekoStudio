@@ -110,7 +110,6 @@ import com.adb.kitty.service.*
 import com.adb.kitty.R
 
 import libs.libs.libs.adb.abb.AbbUninstallOptions
-import libs.libs.libs.adb.connect.AdbStream
 
 @Keep
 class MainActivity : ComponentActivity() {
@@ -129,7 +128,10 @@ class MainActivity : ComponentActivity() {
     private var epOut: UsbEndpoint? = null
     private var readerJob: Job? = null
     private var logCollectJob: Job? = null
-    private var activeStream: AdbStream? = null
+
+    // 记录当前活跃的 Shell 会话 ID 与 协程 Job
+    private var activeSessionId: Long? = null
+    private var activeSessionJob: Job? = null
 
     private var isUsbAttached = false
     private var isAdbAuthorized = false
@@ -1088,16 +1090,53 @@ class MainActivity : ComponentActivity() {
 
                     "shell" -> {
                         val cmd = adbCmd.removePrefix("shell").trim()
-                        val res = client.shell.execV2(cmd)
-                        appendLog(res.stdout.ifEmpty { res.stderr })
+
+                        // 1. 若当前已有正在运行的持续流（如上次执行了 logcat 未关闭），先自动释放旧流
+                        activeSessionId?.let { oldId ->
+                            scope.launch { client.shell.exit(oldId) }
+                            activeSessionJob?.cancel()
+                            activeSessionId = null
+                        }
+
+                        // 2. 开启流式传输，拿到 sessionId 和实时输出 Flow（秒级首包响应）
+                        val (sessionId, streamFlow) = client.shell.execStreamWithSession(cmd)
+                        activeSessionId = sessionId
+
+                        // 3. 在协程中实时收集 chunk 并更新日志，不阻塞主流程
+                        activeSessionJob = scope.launch {
+                            try {
+                                streamFlow.collect { chunk ->
+                                    val text = String(chunk.data, Charsets.UTF_8)
+                                    if (text.isNotEmpty()) {
+                                        appendLog(text)
+                                    }
+                                }
+                            } finally {
+                                // 流自然结束（或被 cancel）时清理状态标志
+                                if (activeSessionId == sessionId) {
+                                    activeSessionId = null
+                                    activeSessionJob = null
+                                }
+                            }
+                        }
                     }
 
                     "--shell-exit" -> {
-                        val stream = activeStream
-                        if (stream != null) {
-                            client.shell.exit(stream)
-                            activeStream = null
-                            appendLog("[info] 已成功主动关闭 adb Shell 流")
+                        val sessionId = activeSessionId
+                        if (sessionId != null) {
+                            scope.launch {
+                                // 主动调用 client.shell.exit(sessionId)，内部发送 ADB CLSE 切断通道并强杀设备端进程
+                                val success = client.shell.exit(sessionId)
+                                if (success) {
+                                    appendLog("[info] 已成功主动关闭 adb Shell 流 (Session: $sessionId)")
+                                } else {
+                                    appendLog("[warn] 关闭 Shell 流失败或流已释放")
+                                }
+                            }
+                            // 取消客户端日志收集协程
+                            activeSessionJob?.cancel()
+                            activeSessionId = null
+                            activeSessionJob = null
                         } else {
                             appendLog("[warn] 当前没有正在运行的 Shell 流")
                         }
@@ -1261,9 +1300,36 @@ class MainActivity : ComponentActivity() {
 
                     else -> {
                         // 透传 Shell 命令
-                        val res = client.shell.exec(adbCmd)
-                        val output = res.stdout.ifEmpty { res.stderr }
-                        appendLog(output.ifEmpty { "[exec finish, exit code ${res.exitCode}]" })
+                        val cmd = adbCmd.trim()
+
+                        // 1. 若当前已有正在运行的持续流（如上次执行了 logcat 未关闭），先自动释放旧流
+                        activeSessionId?.let { oldId ->
+                            scope.launch { client.shell.exit(oldId) }
+                            activeSessionJob?.cancel()
+                            activeSessionId = null
+                        }
+
+                        // 2. 开启流式传输，拿到 sessionId 和实时输出 Flow（秒级首包响应）
+                        val (sessionId, streamFlow) = client.shell.execStreamWithSession(cmd)
+                        activeSessionId = sessionId
+
+                        // 3. 在协程中实时收集 chunk 并更新日志，不阻塞主流程
+                        activeSessionJob = scope.launch {
+                            try {
+                                streamFlow.collect { chunk ->
+                                    val text = String(chunk.data, Charsets.UTF_8)
+                                    if (text.isNotEmpty()) {
+                                        appendLog(text)
+                                    }
+                                }
+                            } finally {
+                                // 流自然结束（或被 cancel）时清理状态标志
+                                if (activeSessionId == sessionId) {
+                                    activeSessionId = null
+                                    activeSessionJob = null
+                                }
+                            }
+                        }
                     }
                 }
             }.onFailure { e ->

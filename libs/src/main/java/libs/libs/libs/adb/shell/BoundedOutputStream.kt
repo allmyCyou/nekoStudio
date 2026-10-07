@@ -3,7 +3,7 @@ package libs.libs.libs.adb.shell
 import java.io.ByteArrayOutputStream
 
 /**
- * 带有最大字节数限制的 ByteArrayOutputStream，防止海量日志（如 logcat/dumpsys）撑爆内存
+ * 带有最大字节数限制的 ByteArrayOutputStream，防止 logcat/dumpsys 撑爆 JVM 内存
  */
 internal class BoundedOutputStream(private val maxBytes: Int) {
     private val stream = ByteArrayOutputStream()
@@ -27,7 +27,7 @@ internal class BoundedOutputStream(private val maxBytes: Int) {
     fun toStringUtf8(): String {
         val output = stream.toString(Charsets.UTF_8.name())
         return if (isTruncated) {
-            "$output\n... [Output Truncated: Exceeded max limit of ${maxBytes / 1024 / 1024}MB]"
+            "$output\n... [Output Truncated: Exceeded limit of ${maxBytes / 1024 / 1024}MB]"
         } else output
     }
 

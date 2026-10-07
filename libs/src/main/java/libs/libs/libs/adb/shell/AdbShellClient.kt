@@ -9,42 +9,139 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 public class AdbShellClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
     public companion object {
-        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 2 * 1024 * 1024 // 默认最大限制 2MB
-        public const val DEFAULT_TIMEOUT_MS: Long = 15_000L              // 默认超时时间 15 秒
+        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 2 * 1024 * 1024 // 默认单次拉取最大 2MB
+        public const val DEFAULT_TIMEOUT_MS: Long = 15_000L              // 默认单条指令超时 15 秒
+    }
+
+    private val sessionCounter = AtomicLong(0)
+    
+    // 维护当前正在运行的所有 Shell 活跃流映射 (sessionId -> AdbStream)
+    private val activeStreams = ConcurrentHashMap<Long, AdbStream>()
+
+    /**
+     * 主动根据 sessionId 关闭指定 Shell 持续流（如终止某个 logcat）
+     * 内部通过调用 [AdbStream.close] 向设备端发送 ADB CLSE 报文，终止远端进程
+     */
+    public suspend fun exit(sessionId: Long): Boolean = withContext(Dispatchers.IO) {
+        val stream = activeStreams.remove(sessionId) ?: return@withContext false
+        try {
+            stream.close()
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /**
-     * 执行 Shell 指令（乐观尝试 Shell V2，失败/不支持时自动无缝降级至 V1）
+     * 主动关闭 Client 管理的所有活跃 Shell 流（如页面销毁、连接断开时一键清理）
      */
+    public suspend fun exitAll(): Unit = withContext(Dispatchers.IO) {
+        val iterator = activeStreams.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            iterator.remove()
+            try {
+                entry.value.close()
+            } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * 获取当前正在运行的 Shell 会话数量
+     */
+    public val activeSessionCount: Int get() = activeStreams.size
+
+    // 秒级响应：流式传输 Flow (支持 Session 管理)
+
+    /**
+     * 启动流式 Shell 会话，返回分配的 [sessionId] 以及对应的 [Flow]
+     * 完美支持 logcat/dumpsys 等秒级输出、持续性或海量日志指令
+     */
+    public fun execStreamWithSession(command: String): Pair<Long, Flow<ShellStreamChunk>> {
+        val sessionId = sessionCounter.incrementAndGet()
+
+        val streamFlow = flow {
+            val v2Stream = connection.openStream("shell,v2,raw:$command")
+            if (v2Stream != null) {
+                activeStreams[sessionId] = v2Stream
+                var emittedAny = false
+                try {
+                    readShellV2Stream(v2Stream) { packet ->
+                        when (packet.id) {
+                            ShellV2Packet.ID_STDOUT -> {
+                                emittedAny = true
+                                emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
+                            }
+                            ShellV2Packet.ID_STDERR -> {
+                                emittedAny = true
+                                emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
+                            }
+                            ShellV2Packet.ID_EXIT -> emittedAny = true
+                        }
+                    }
+                    if (emittedAny) return@flow
+                } catch (e: Exception) {
+                    if (emittedAny) throw e
+                } finally {
+                    activeStreams.remove(sessionId)
+                    v2Stream.close()
+                }
+            }
+
+            // V1 降级通道
+            val v1Stream = connection.openStream("exec:$command") ?: return@flow
+            activeStreams[sessionId] = v1Stream
+            try {
+                while (true) {
+                    val data = v1Stream.read() ?: break
+                    if (data.isNotEmpty()) {
+                        emit(ShellStreamChunk(ShellStreamType.STDOUT, data))
+                    }
+                }
+            } finally {
+                activeStreams.remove(sessionId)
+                v1Stream.close()
+            }
+        }.flowOn(Dispatchers.IO)
+
+        return sessionId to streamFlow
+    }
+
+    /**
+     * 兼容性简易 Flow 接口 (无需关注 sessionId)
+     */
+    public fun execStream(command: String): Flow<ShellStreamChunk> {
+        return execStreamWithSession(command).second
+    }
+
+    // 一次性指令执行：防爆内存 + 超时保护
+
     public suspend fun exec(
         command: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
         maxOutputSize: Int = DEFAULT_MAX_OUTPUT_BYTES
     ): ShellCommandResult = withContext(Dispatchers.IO) {
         val v2Result = execV2(command, timeoutMs, maxOutputSize)
-        
         if (v2Result.exitCode == -1 && v2Result.stderr.startsWith("Failed to open shell_v2 stream")) {
             return@withContext execV1(command, timeoutMs, maxOutputSize)
         }
-        
         v2Result
     }
 
-    /**
-     * 以 Shell V2 模式发送命令 (`shell,v2,raw:`)
-     */
     public suspend fun execV2(
         command: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
         maxOutputSize: Int = DEFAULT_MAX_OUTPUT_BYTES
     ): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
+        val sessionId = sessionCounter.incrementAndGet()
         var stream: AdbStream? = null
 
         try {
@@ -53,6 +150,8 @@ public class AdbShellClient(
                     ?: return@withTimeout ShellCommandResult(
                         exitCode = -1, stdout = "", stderr = "Failed to open shell_v2 stream", durationMs = 0L
                     )
+
+                activeStreams[sessionId] = stream!!
 
                 val stdoutStream = BoundedOutputStream(maxOutputSize)
                 val stderrStream = BoundedOutputStream(maxOutputSize)
@@ -79,32 +178,27 @@ public class AdbShellClient(
             }
         } catch (_: TimeoutCancellationException) {
             ShellCommandResult(
-                exitCode = -1,
-                stdout = "",
-                stderr = "Command execution timed out after ${timeoutMs}ms",
+                exitCode = -1, stdout = "", stderr = "Command execution timed out after ${timeoutMs}ms",
                 durationMs = System.currentTimeMillis() - startTime
             )
         } catch (e: Exception) {
             ShellCommandResult(
-                exitCode = -1,
-                stdout = "",
-                stderr = "Shell V2 read failed: ${e.message}",
+                exitCode = -1, stdout = "", stderr = "Shell V2 read failed: ${e.message}",
                 durationMs = System.currentTimeMillis() - startTime
             )
         } finally {
+            activeStreams.remove(sessionId)
             stream?.close()
         }
     }
 
-    /**
-     * 以 Exec (V1) 模式发送命令
-     */
     public suspend fun execV1(
         command: String,
         timeoutMs: Long = DEFAULT_TIMEOUT_MS,
         maxOutputSize: Int = DEFAULT_MAX_OUTPUT_BYTES
     ): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
+        val sessionId = sessionCounter.incrementAndGet()
         val sentinel = "__ADB_EXIT_CODE_${startTime}__:"
         val wrappedCommand = "($command); printf \"\n$sentinel%d\" \$?"
 
@@ -115,6 +209,8 @@ public class AdbShellClient(
                     ?: return@withTimeout ShellCommandResult(
                         exitCode = -1, stdout = "", stderr = "Failed to open exec stream", durationMs = 0L
                     )
+
+                activeStreams[sessionId] = stream!!
 
                 val outputStream = BoundedOutputStream(maxOutputSize)
                 while (true) {
@@ -143,97 +239,9 @@ public class AdbShellClient(
         } catch (_: TimeoutCancellationException) {
             ShellCommandResult(-1, "", "Command execution timed out after ${timeoutMs}ms", System.currentTimeMillis() - startTime)
         } finally {
+            activeStreams.remove(sessionId)
             stream?.close()
         }
-    }
-
-    /**
-     * 流式传输 Flow（秒级首包响应，实时输出，不积压堆内存，完美支持 logcat/dumpsys）
-     */
-    public fun execStream(command: String): Flow<ShellStreamChunk> = flow {
-        val v2Stream = connection.openStream("shell,v2,raw:$command")
-        if (v2Stream != null) {
-            var emittedAny = false
-            try {
-                readShellV2Stream(v2Stream) { packet ->
-                    when (packet.id) {
-                        ShellV2Packet.ID_STDOUT -> {
-                            emittedAny = true
-                            emit(ShellStreamChunk(ShellStreamType.STDOUT, packet.payload))
-                        }
-                        ShellV2Packet.ID_STDERR -> {
-                            emittedAny = true
-                            emit(ShellStreamChunk(ShellStreamType.STDERR, packet.payload))
-                        }
-                        ShellV2Packet.ID_EXIT -> emittedAny = true
-                    }
-                }
-                if (emittedAny) return@flow
-            } catch (e: Exception) {
-                if (emittedAny) throw e
-            } finally {
-                v2Stream.close()
-            }
-        }
-
-        // V1 降级通道
-        val v1Stream = connection.openStream("exec:$command") ?: return@flow
-        try {
-            while (true) {
-                val data = v1Stream.read() ?: break
-                if (data.isNotEmpty()) {
-                    emit(ShellStreamChunk(ShellStreamType.STDOUT, data))
-                }
-            }
-        } finally {
-            v1Stream.close()
-        }
-    }.flowOn(Dispatchers.IO)
-
-    public suspend fun execRawBytes(
-        command: String,
-        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
-        maxOutputSize: Int = DEFAULT_MAX_OUTPUT_BYTES
-    ): ByteArray = withContext(Dispatchers.IO) {
-        val v2Stream = connection.openStream("shell,v2,raw:$command")
-        if (v2Stream != null) {
-            val stdoutStream = BoundedOutputStream(maxOutputSize)
-            var v2Executed = false
-            try {
-                withTimeout(timeoutMs) {
-                    readShellV2Stream(v2Stream) { packet ->
-                        when (packet.id) {
-                            ShellV2Packet.ID_STDOUT -> {
-                                v2Executed = true
-                                stdoutStream.write(packet.payload)
-                            }
-                            ShellV2Packet.ID_EXIT -> v2Executed = true
-                        }
-                    }
-                }
-                if (v2Executed) return@withContext stdoutStream.toByteArray()
-            } catch (_: Exception) {
-            } finally {
-                v2Stream.close()
-            }
-        }
-
-        val v1Stream = connection.openStream("exec:$command")
-            ?: throw IllegalStateException("Failed to open exec stream for raw bytes")
-
-        val bytesOutput = BoundedOutputStream(maxOutputSize)
-        try {
-            withTimeout(timeoutMs) {
-                while (true) {
-                    val data = v1Stream.read() ?: break
-                    if (data.isNotEmpty()) bytesOutput.write(data)
-                }
-            }
-        } finally {
-            v1Stream.close()
-        }
-
-        bytesOutput.toByteArray()
     }
 
     private suspend inline fun readShellV2Stream(
