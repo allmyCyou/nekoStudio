@@ -13,6 +13,7 @@ import android.content.Context
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.util.AttributeSet
+import android.text.Spannable
 import android.view.ActionMode
 import android.view.Menu
 import android.view.MenuItem
