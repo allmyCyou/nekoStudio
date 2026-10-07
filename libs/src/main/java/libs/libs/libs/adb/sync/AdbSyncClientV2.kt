@@ -89,8 +89,6 @@ public class AdbSyncClientV2(
             try {
                 val requestBytes = SyncCommandV2.createStatOrListRequestV2(
                     id = SyncCommandV2.ID_LST2,
-                    mode = 0,
-                    flags = SyncFlags.FLAG_NONE,
                     remotePath = remotePath
                 )
                 stream.write(requestBytes)
