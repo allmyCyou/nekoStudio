@@ -27,7 +27,7 @@ internal class BoundedOutputStream(private val maxBytes: Int) {
     fun toStringUtf8(): String {
         val output = stream.toString(Charsets.UTF_8.name())
         return if (isTruncated) {
-            "$output\n... [Output Truncated: Exceeded limit of ${maxBytes / 1024 / 1024}MB]"
+            "$output\n... [Output Truncated: Exceeded limit of ${maxBytes / 1024}KB]"
         } else output
     }
 

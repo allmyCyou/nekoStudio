@@ -16,8 +16,8 @@ public class AdbShellClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
     public companion object {
-        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 2 * 1024 * 1024 // 默认单次拉取最大 2MB
-        public const val DEFAULT_TIMEOUT_MS: Long = 15_000L              // 默认单条指令超时 15 秒
+        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 64 * 1024
+        public const val DEFAULT_TIMEOUT_MS: Long = 15_000L
     }
 
     private val sessionCounter = AtomicLong(0)
