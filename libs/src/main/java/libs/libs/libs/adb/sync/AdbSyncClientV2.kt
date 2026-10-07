@@ -205,7 +205,9 @@ public class AdbSyncClientV2(
                     // 传输成功
                 }
                 SyncCommand.ID_FAIL -> {
-                    val errorMsg = reader.readString(len)
+                    // 修复：读取字节数组后转换为 UTF-8 字符串
+                    val errorBytes = reader.readExactBytes(len)
+                    val errorMsg = String(errorBytes, Charsets.UTF_8)
                     throw IOException("Adbd V2 Push FAIL: $errorMsg")
                 }
                 else -> {
