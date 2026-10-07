@@ -123,36 +123,47 @@ private class LogContainerView(context: Context) : NestedScrollView(context) {
             setHorizontallyScrolling(true)
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
 
-            setOnLongClickListener { v ->
-                val tv = v as TextView
-                
-                // 确保文本 Buffer 转换为可变的 Spannable 类型，防止 Editor 强转失败
-                if (tv.text !is Spannable) {
-                    tv.setText(tv.text, TextView.BufferType.SPANNABLE)
-                }
-
-                tv.setTextIsSelectable(true)
-                tv.requestFocus()
-
-                tv.customSelectionActionModeCallback = object : ActionMode.Callback {
-                    override fun onCreateActionMode(mode: ActionMode?, menu: Menu?): Boolean = true
-                    override fun onPrepareActionMode(mode: ActionMode?, menu: Menu?): Boolean = false
-                    override fun onActionItemClicked(mode: ActionMode?, item: MenuItem?): Boolean = false
-
-                    override fun onDestroyActionMode(mode: ActionMode?) {
-                        // 离开选择状态时恢复为不可选中
-                        tv.post {
-                            tv.setTextIsSelectable(false)
-                        }
-                    }
-                }
-
-                false
-            }
+            bindLongClickListener(this)
         }
 
         horizontalScrollView.addView(textView)
         addView(horizontalScrollView)
+    }
+
+    // 将绑定长按监听抽离为独立函数
+    private fun bindLongClickListener(tv: TextView) {
+        tv.setOnLongClickListener { v ->
+            val textView = v as TextView
+
+            // 1. 防御性检查：确保 Buffer 类型为 Spannable
+            if (textView.text !is Spannable) {
+                textView.setText(textView.text, TextView.BufferType.SPANNABLE)
+            }
+
+            // 2. 开启选择状态（这会覆盖当前的 OnLongClickListener，但后续会恢复）
+            textView.setTextIsSelectable(true)
+            textView.requestFocus()
+
+            // 3. 设置 ActionMode 回调
+            textView.customSelectionActionModeCallback = object : ActionMode.Callback {
+                override fun onCreateActionMode(mode: ActionMode?, menu: Menu?): Boolean = true
+                override fun onPrepareActionMode(mode: ActionMode?, menu: Menu?): Boolean = false
+                override fun onActionItemClicked(mode: ActionMode?, item: MenuItem?): Boolean = false
+
+                override fun onDestroyActionMode(mode: ActionMode?) {
+                    // 4. 延迟到下一帧，避开 Editor 销毁时的 removeSelection 强转崩溃
+                    textView.post {
+                        // 关闭选择状态（这会导致系统把 OnLongClickListener 置为 null）
+                        textView.setTextIsSelectable(false)
+
+                        // 重新把长按监听器装回去！
+                        bindLongClickListener(textView)
+                    }
+                }
+            }
+    
+            false
+        }
     }
 
     override fun dispatchTouchEvent(ev: MotionEvent?): Boolean {
