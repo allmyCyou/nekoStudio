@@ -43,11 +43,12 @@ import java.io.InputStream
 private class MdnsSuccessException : CancellationException("mDNS operation succeeded")
 
 /**
- * 远端文件节点元数据（内部目录树扫描使用）
+ * 远端节点（文件或目录）元数据
  */
-private data class RemoteFileInfo(
+private data class RemoteNodeInfo(
     val remotePath: String,
     val relativePath: String,
+    val isDirectory: Boolean,
     val size: Long
 )
 
@@ -461,7 +462,7 @@ public class AdbClient(
      * 2. 若 [local] 为目录：
      *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，远端基准目录为 `remotePath/local.name`
      *    - 否则远端基准目录为 `remotePath`
-     *    - 自动递归展开本地目录树并依次上传，实时计算并回调总体传输进度
+     *    - 自动通过 shell.exec 预先建好远端所有文件夹（支持空目录），再依次上传所有子文件
      */
     public suspend fun push(
         local: File,
@@ -488,7 +489,20 @@ public class AdbClient(
                     remotePath.trimEnd('/')
                 }
 
-                // 收集所有子文件计算总字节数
+                // 1. 优先预建立远端完整目录树（包括空目录）
+                val allDirs = local.walkTopDown().filter { it.isDirectory }.toList()
+                for (dir in allDirs) {
+                    val relativePath = dir.relativeTo(local).path.replace('\\', '/')
+                    val targetRemoteDir = if (relativePath.isEmpty()) {
+                        baseRemoteDir
+                    } else {
+                        "$baseRemoteDir/$relativePath"
+                    }
+                    // 调用 shell.exec 在远端建好目录节点
+                    shell.exec("mkdir -p \"${targetRemoteDir.replace("\"", "\\\"")}\"")
+                }
+
+                // 2. 收集所有子文件计算总字节数并依次传输
                 val allFiles = local.walkTopDown().filter { it.isFile }.toList()
                 val totalBytes = allFiles.sumOf { it.length() }
                 var accumulatedBytes = 0L
@@ -517,7 +531,7 @@ public class AdbClient(
      * 2. 若 [remotePath] 为目录：
      *    - 当 [local] 为已存在目录，本地基准目录为 `File(local, remoteDirName)`
      *    - 否则本地基准目录为 `local`
-     *    - 递归扫描远端目录结构，校验安全性后批量拉取落地，实时回调总体进度
+     *    - 递归扫描远端树结构，提前在本地重建所有目录（含空目录），再批量拉取文件
      */
     public suspend fun pull(
         remotePath: String,
@@ -543,16 +557,30 @@ public class AdbClient(
                     local
                 }
 
-                // 1. 递归扫描远端文件树结构及尺寸
-                val remoteFiles = scanRemoteTree(remoteCleanPath)
+                // 1. 扫描远端全量节点（目录 + 文件）
+                val remoteNodes = scanRemoteTree(remoteCleanPath)
+                val remoteFiles = remoteNodes.filter { !it.isDirectory }
                 val totalBytes = remoteFiles.sumOf { it.size }
                 var accumulatedBytes = 0L
 
-                // 2. 依次拉取各个文件
+                // 2. 提前在本地重建所有目录结构（包含空目录）
+                baseLocalDir.mkdirs()
+                for (dirNode in remoteNodes.filter { it.isDirectory }) {
+                    val targetLocalDir = File(baseLocalDir, dirNode.relativePath)
+
+                    // 路径穿越安全防护 (Zip Slip Protection)
+                    val canonicalDest = targetLocalDir.canonicalPath
+                    val canonicalBase = baseLocalDir.canonicalPath
+                    if (!canonicalDest.startsWith(canonicalBase)) {
+                        throw SecurityException("检测到非法路径穿越尝试: ${dirNode.relativePath}")
+                    }
+                    targetLocalDir.mkdirs()
+                }
+
+                // 3. 依次拉取各个文件
                 for (item in remoteFiles) {
                     val targetLocalFile = File(baseLocalDir, item.relativePath)
 
-                    // 路径穿越安全防护 (Zip Slip Protection)
                     val canonicalDest = targetLocalFile.canonicalPath
                     val canonicalBase = baseLocalDir.canonicalPath
                     if (!canonicalDest.startsWith(canonicalBase)) {
@@ -573,23 +601,27 @@ public class AdbClient(
      * 判断远端路径是否为目录
      */
     private suspend fun isRemoteDirectory(remotePath: String): Boolean {
+        if (remotePath.endsWith("/")) return true
+
         return runCatching {
             val stat = sync.statV2(remotePath)
             stat.exists && stat.isDirectory
-        }.getOrDefault(false)
+        }.getOrElse {
+            false
+        }
     }
 
     /**
-     * 递归扫描远端文件树
+     * 递归扫描远端文件树结构（兼顾文件与目录节点）
      */
     private suspend fun scanRemoteTree(
         baseRemoteDir: String,
         currentRelativeDir: String = "",
         depth: Int = 0
-    ): List<RemoteFileInfo> {
-        if (depth > 32) return emptyList() // 避免循环软链接导致无限递归
+    ): List<RemoteNodeInfo> {
+        if (depth > 32) return emptyList()
 
-        val result = mutableListOf<RemoteFileInfo>()
+        val result = mutableListOf<RemoteNodeInfo>()
         val currentRemoteDir = if (currentRelativeDir.isEmpty()) {
             baseRemoteDir
         } else {
@@ -598,10 +630,8 @@ public class AdbClient(
 
         val dirEntries = runCatching { sync.listV2(currentRemoteDir) }.getOrDefault(emptyList())
         for (stat in dirEntries) {
-            // 过滤无效或出错的节点
             if (!stat.exists) continue
 
-            // 提取节点文件名（确保兼顾绝对路径与纯文件名返回格式）
             val fileName = stat.path.trimEnd('/').substringAfterLast('/')
             if (fileName == "." || fileName == ".." || fileName.isBlank()) continue
 
@@ -609,9 +639,11 @@ public class AdbClient(
             val fullRemotePath = "$baseRemoteDir/$relativePath"
 
             if (stat.isDirectory) {
+                // 记录目录节点本身（确保存在空目录时也能成功落地）
+                result.add(RemoteNodeInfo(fullRemotePath, relativePath, isDirectory = true, size = 0L))
                 result.addAll(scanRemoteTree(baseRemoteDir, relativePath, depth + 1))
             } else if (stat.isFile) {
-                result.add(RemoteFileInfo(fullRemotePath, relativePath, stat.size))
+                result.add(RemoteNodeInfo(fullRemotePath, relativePath, isDirectory = false, size = stat.size))
             }
         }
 
