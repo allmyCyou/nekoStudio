@@ -1091,24 +1091,36 @@ class MainActivity : ComponentActivity() {
                     "shell" -> {
                         val cmd = adbCmd.removePrefix("shell").trim()
 
+                        // 1. 如果当前有正在运行的 Shell 流，先主动关闭并取消收集 Job
                         activeSessionId?.let { oldId ->
-                            lifecycleScope.launch { client.shell.exit(oldId) }
-                            activeSessionJob?.cancel()
+                            val oldJob = activeSessionJob
                             activeSessionId = null
+                            activeSessionJob = null
+                            lifecycleScope.launch { client.shell.exit(oldId) }
+                            oldJob?.cancel()
                         }
 
+                        // 2. 启动新的 Shell 会话（返回的 streamFlow 已在后台完成按行切分）
                         val (sessionId, streamFlow) = client.shell.execStreamWithSession(cmd)
                         activeSessionId = sessionId
 
                         activeSessionJob = lifecycleScope.launch {
                             try {
                                 streamFlow.collect { chunk ->
-                                    val text = String(chunk.data, Charsets.UTF_8)
-                                    if (text.isNotEmpty()) {
-                                        appendLog(text)
+                                    // chunk.data 已是 LineBuffer 剥离了 \n/\r\n 的单行字节数组
+                                    val line = String(chunk.data, Charsets.UTF_8)
+                                    if (line.isNotEmpty()) {
+                                        // 若你的 appendLog 接受独立单行，直接传入即可；若需换行符可传 "$line\n"
+                                        appendLog(line)
                                     }
                                 }
+                            } catch (e: Exception) {
+                                // 过滤掉协程正常取消异常，仅打印非取消类网络/数据流异常
+                                if (e !is CancellationException) {
+                                    appendLog("[error] Shell 流异常中断: ${e.message}")
+                                }
                             } finally {
+                                // 正常结束或流断开时，恢复 Session 状态
                                 if (activeSessionId == sessionId) {
                                     activeSessionId = null
                                     activeSessionJob = null
@@ -1120,17 +1132,20 @@ class MainActivity : ComponentActivity() {
                     "--shell-exit" -> {
                         val sessionId = activeSessionId
                         if (sessionId != null) {
+                            val jobToCancel = activeSessionJob
+                            // 先重置状态变量，防止逻辑重入
+                            activeSessionId = null
+                            activeSessionJob = null
+
                             lifecycleScope.launch {
                                 val success = client.shell.exit(sessionId)
                                 if (success) {
-                                    appendLog("[info] 已成功主动关闭 adb Shell 流 (Session: $sessionId)")
+                                    appendLog("[info] 已成功主动关闭 ADB Shell 流 (Session: $sessionId)")
                                 } else {
-                                    appendLog("[warn] 关闭 Shell 流失败或流已释放")
+                                    appendLog("[warn] 关闭 Shell 流失败或流已释放 (Session: $sessionId)")
                                 }
                             }
-                            activeSessionJob?.cancel()
-                            activeSessionId = null
-                            activeSessionJob = null
+                            jobToCancel?.cancel()
                         } else {
                             appendLog("[warn] 当前没有正在运行的 Shell 流")
                         }
@@ -1296,24 +1311,36 @@ class MainActivity : ComponentActivity() {
                         // 透传 Shell 命令
                         val cmd = adbCmd.trim()
 
+                        // 1. 如果当前有正在运行的 Shell 流，先主动关闭并取消收集 Job
                         activeSessionId?.let { oldId ->
-                            lifecycleScope.launch { client.shell.exit(oldId) }
-                            activeSessionJob?.cancel()
+                            val oldJob = activeSessionJob
                             activeSessionId = null
+                            activeSessionJob = null
+                            lifecycleScope.launch { client.shell.exit(oldId) }
+                            oldJob?.cancel()
                         }
 
+                        // 2. 启动新的 Shell 会话（返回的 streamFlow 已在后台完成按行切分）
                         val (sessionId, streamFlow) = client.shell.execStreamWithSession(cmd)
                         activeSessionId = sessionId
 
                         activeSessionJob = lifecycleScope.launch {
                             try {
                                 streamFlow.collect { chunk ->
-                                    val text = String(chunk.data, Charsets.UTF_8)
-                                    if (text.isNotEmpty()) {
-                                        appendLog(text)
+                                    // chunk.data 已是 LineBuffer 剥离了 \n/\r\n 的单行字节数组
+                                    val line = String(chunk.data, Charsets.UTF_8)
+                                    if (line.isNotEmpty()) {
+                                        // 若你的 appendLog 接受独立单行，直接传入即可；若需换行符可传 "$line\n"
+                                        appendLog(line)
                                     }
                                 }
+                            } catch (e: Exception) {
+                                // 过滤掉协程正常取消异常，仅打印非取消类网络/数据流异常
+                                if (e !is CancellationException) {
+                                    appendLog("[error] Shell 流异常中断: ${e.message}")
+                                }
                             } finally {
+                                // 正常结束或流断开时，恢复 Session 状态
                                 if (activeSessionId == sessionId) {
                                     activeSessionId = null
                                     activeSessionJob = null

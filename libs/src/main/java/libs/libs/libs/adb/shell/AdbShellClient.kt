@@ -7,6 +7,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.ConcurrentHashMap
@@ -30,7 +31,6 @@ public class AdbShellClient(
 
     /**
      * 主动根据 sessionId 关闭指定 Shell 持续流（如终止某个 logcat）
-     * 内部通过调用 [AdbStream.close] 向设备端发送 ADB CLSE 报文，终止远端进程
      */
     public suspend fun exit(sessionId: Long): Boolean = withContext(Dispatchers.IO) {
         val stream = activeStreams.remove(sessionId) ?: return@withContext false
@@ -43,7 +43,7 @@ public class AdbShellClient(
     }
 
     /**
-     * 主动关闭 Client 管理的所有活跃 Shell 流（如页面销毁、连接断开时一键清理）
+     * 主动关闭 Client 管理的所有活跃 Shell 流
      */
     public suspend fun exitAll(): Unit = withContext(Dispatchers.IO) {
         val iterator = activeStreams.entries.iterator()
@@ -61,39 +61,47 @@ public class AdbShellClient(
      */
     public val activeSessionCount: Int get() = activeStreams.size
 
-    // 秒级响应：流式传输 Flow (支持 Session 管理)
+    // 秒级响应：流式传输 Flow (单行更新机制)
 
     /**
-     * 启动流式 Shell 会话，返回分配的 [sessionId] 以及对应的 [Flow]
-     * 完美支持 logcat/dumpsys 等秒级输出、持续性或海量日志指令
+     * 启动按行更新的流式 Shell 会话，返回 [sessionId] 以及按行发射的 [Flow]
+     * 每一个发射出的 [ShellStreamChunk] 均精确对应远端输出的【单行数据】
      */
     public fun execStreamWithSession(command: String): Pair<Long, Flow<ShellStreamChunk>> {
         val sessionId = sessionCounter.incrementAndGet()
 
         val streamFlow = flow {
+            var emittedAny = false
+
+            // 创建 STDOUT 与 STDERR 独立行缓冲区
+            val stdoutLineBuffer = LineBuffer { lineBytes ->
+                emittedAny = true
+                emit(ShellStreamChunk(ShellStreamType.STDOUT, lineBytes))
+            }
+
+            val stderrLineBuffer = LineBuffer { lineBytes ->
+                emittedAny = true
+                emit(ShellStreamChunk(ShellStreamType.STDERR, lineBytes))
+            }
+
             // 安全尝试打开 V2 流
             val v2Stream = runCatching { connection.openStream("shell,v2,raw:$command") }.getOrNull()
             if (v2Stream != null) {
                 activeStreams[sessionId] = v2Stream
-                var emittedAny = false
                 try {
                     readShellV2StreamZeroAlloc(v2Stream) { id, buffer, offset, length ->
                         when (id) {
-                            ShellV2Packet.ID_STDOUT -> {
-                                emittedAny = true
-                                val payload = buffer.copyOfRange(offset, offset + length)
-                                emit(ShellStreamChunk(ShellStreamType.STDOUT, payload))
-                            }
-                            ShellV2Packet.ID_STDERR -> {
-                                emittedAny = true
-                                val payload = buffer.copyOfRange(offset, offset + length)
-                                emit(ShellStreamChunk(ShellStreamType.STDERR, payload))
-                            }
+                            ShellV2Packet.ID_STDOUT -> stdoutLineBuffer.append(buffer, offset, length)
+                            ShellV2Packet.ID_STDERR -> stderrLineBuffer.append(buffer, offset, length)
                             ShellV2Packet.ID_EXIT -> emittedAny = true
                         }
                     }
+                    stdoutLineBuffer.flush()
+                    stderrLineBuffer.flush()
                     if (emittedAny) return@flow
                 } catch (e: Exception) {
+                    stdoutLineBuffer.flush()
+                    stderrLineBuffer.flush()
                     if (emittedAny) throw e
                 } finally {
                     activeStreams.remove(sessionId)
@@ -101,16 +109,17 @@ public class AdbShellClient(
                 }
             }
 
-            // V1 降级通道：安全尝试打开 V1 流
+            // V1 降级通道：按行处理数据
             val v1Stream = runCatching { connection.openStream("exec:$command") }.getOrNull() ?: return@flow
             activeStreams[sessionId] = v1Stream
             try {
                 while (true) {
                     val data = v1Stream.read() ?: break
                     if (data.isNotEmpty()) {
-                        emit(ShellStreamChunk(ShellStreamType.STDOUT, data))
+                        stdoutLineBuffer.append(data, 0, data.size)
                     }
                 }
+                stdoutLineBuffer.flush()
             } finally {
                 activeStreams.remove(sessionId)
                 v1Stream.close()
@@ -121,10 +130,20 @@ public class AdbShellClient(
     }
 
     /**
-     * 兼容性简易 Flow 接口 (无需关注 sessionId)
+     * 兼容性按行更新 Flow 接口 (无需关注 sessionId)
      */
     public fun execStream(command: String): Flow<ShellStreamChunk> {
         return execStreamWithSession(command).second
+    }
+
+    /**
+     * UI 友好型按行文本 Flow 接口
+     * 每次 `collect` 直接接收包含单行 UTF-8 文本的 [String]
+     */
+    public fun execTextStream(command: String): Flow<String> {
+        return execStream(command).map { chunk ->
+            String(chunk.data, Charsets.UTF_8)
+        }
     }
 
     // 一次性指令执行：防爆内存 + 超时保护
@@ -271,7 +290,6 @@ public class AdbShellClient(
                         var hasPacket = false
                         var isExit = false
 
-                        // 零拷贝指针解析
                         buffer.pollPacket { id, buf, offset, length ->
                             hasPacket = true
                             if (id == ShellV2Packet.ID_EXIT) {
@@ -287,6 +305,77 @@ public class AdbShellClient(
             }
         } finally {
             buffer.reset()
+        }
+    }
+}
+
+/**
+ * 低开销高效字节流按行切分缓冲区
+ */
+internal class LineBuffer(
+    private val onLine: suspend (ByteArray) -> Unit
+) {
+    private var buffer = ByteArray(8192)
+    private var size = 0
+
+    suspend fun append(src: ByteArray, offset: Int, length: Int) {
+        if (length <= 0) return
+        ensureCapacity(size + length)
+        System.arraycopy(src, offset, buffer, size, length)
+        size += length
+
+        var searchStart = 0
+        var i = 0
+        while (i < size) {
+            if (buffer[i] == '\n'.code.toByte()) {
+                var lineEnd = i
+                if (lineEnd > searchStart && buffer[lineEnd - 1] == '\r'.code.toByte()) {
+                    lineEnd--
+                }
+                val lineLen = lineEnd - searchStart
+                val lineBytes = ByteArray(lineLen)
+                if (lineLen > 0) {
+                    System.arraycopy(buffer, searchStart, lineBytes, 0, lineLen)
+                }
+                onLine(lineBytes)
+                searchStart = i + 1
+            }
+            i++
+        }
+
+        if (searchStart > 0) {
+            val remaining = size - searchStart
+            if (remaining > 0) {
+                System.arraycopy(buffer, searchStart, buffer, 0, remaining)
+            }
+            size = remaining
+        }
+    }
+
+    suspend fun flush() {
+        if (size > 0) {
+            var lineEnd = size
+            if (lineEnd > 0 && buffer[lineEnd - 1] == '\r'.code.toByte()) {
+                lineEnd--
+            }
+            val lineBytes = ByteArray(lineEnd)
+            if (lineEnd > 0) {
+                System.arraycopy(buffer, 0, lineBytes, 0, lineEnd)
+            }
+            onLine(lineBytes)
+            size = 0
+        }
+    }
+
+    private fun ensureCapacity(needed: Int) {
+        if (buffer.size < needed) {
+            var newCap = buffer.size * 2
+            while (newCap < needed) newCap *= 2
+            val newBuf = ByteArray(newCap)
+            if (size > 0) {
+                System.arraycopy(buffer, 0, newBuf, 0, size)
+            }
+            buffer = newBuf
         }
     }
 }
