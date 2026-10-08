@@ -259,7 +259,7 @@ public class AdbShellClient(
         stream: AdbStream,
         onPacket: (id: Int, buffer: ByteArray, offset: Int, length: Int) -> Unit
     ) {
-        val buffer = threadLocalBuffer.get()
+        val buffer = checkNotNull(threadLocalBuffer.get())
         buffer.reset()
 
         try {
