@@ -12,9 +12,14 @@ public enum class AdbRootStatus {
     RESTARTING_AS_SHELL,
 
     /**
-     * adbd 当前已经运行在 root 身份下，无需重复切换
+     * adbd 当前已经运行在 root 身份下
      */
     ALREADY_ROOT,
+
+    /**
+     * adbd 当前已经运行在 shell 身份下
+     */
+    ALREADY_SHELL,
 
     /**
      * 系统为 user 生产构建版本，adbd 拒绝提供 root 权限
