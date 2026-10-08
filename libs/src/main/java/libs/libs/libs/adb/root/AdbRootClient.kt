@@ -62,8 +62,10 @@ public class AdbRootClient(private val connection: AdbConnection) {
 
         val status = when {
             lowerText.contains("restarting adbd as root") -> AdbRootStatus.RESTARTING_AS_ROOT
-            lowerText.contains("restarting adbd as") || lowerText.contains("restarting adbd") -> AdbRootStatus.RESTARTING_AS_SHELL
             lowerText.contains("already running as root") -> AdbRootStatus.ALREADY_ROOT
+            lowerText.contains("already running as non-root") || 
+            lowerText.contains("already running as default") -> AdbRootStatus.ALREADY_SHELL
+            lowerText.contains("restarting adbd") -> AdbRootStatus.RESTARTING_AS_SHELL
             lowerText.contains("cannot run as root") -> AdbRootStatus.DISABLED_IN_PRODUCTION
             else -> AdbRootStatus.FAILED
         }

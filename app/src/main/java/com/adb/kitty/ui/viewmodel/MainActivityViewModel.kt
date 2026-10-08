@@ -294,6 +294,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         AdbCommand("登录超级用户", "adb root"),
         AdbCommand("退出超级用户", "adb unroot"),
         AdbCommand("设备重启", "adb reboot "),
+        AdbCommand("侧载安装(Recovery)", "adb sideload "),
         AdbCommand("使用无线配对码一键配对", "adb mdns --pair "),
         AdbCommand("一键连接无线调试", "adb mdns --connect"),
         AdbCommand("列出附近可连接的无线设备", "adb mdns --list"),
