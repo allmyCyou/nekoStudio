@@ -71,7 +71,8 @@ public class AdbShellClient(
         val sessionId = sessionCounter.incrementAndGet()
 
         val streamFlow = flow {
-            val v2Stream = connection.openStream("shell,v2,raw:$command")
+            // 安全尝试打开 V2 流
+            val v2Stream = runCatching { connection.openStream("shell,v2,raw:$command") }.getOrNull()
             if (v2Stream != null) {
                 activeStreams[sessionId] = v2Stream
                 var emittedAny = false
@@ -80,7 +81,6 @@ public class AdbShellClient(
                         when (id) {
                             ShellV2Packet.ID_STDOUT -> {
                                 emittedAny = true
-                                // 拷贝当前 Chunk 切片交给 Flow 下游消费（Buffer 内部数组会在后续读取中被覆写）
                                 val payload = buffer.copyOfRange(offset, offset + length)
                                 emit(ShellStreamChunk(ShellStreamType.STDOUT, payload))
                             }
@@ -101,8 +101,8 @@ public class AdbShellClient(
                 }
             }
 
-            // V1 降级通道
-            val v1Stream = connection.openStream("exec:$command") ?: return@flow
+            // V1 降级通道：安全尝试打开 V1 流
+            val v1Stream = runCatching { connection.openStream("exec:$command") }.getOrNull() ?: return@flow
             activeStreams[sessionId] = v1Stream
             try {
                 while (true) {
@@ -152,9 +152,9 @@ public class AdbShellClient(
 
         try {
             withTimeout(timeoutMs) {
-                stream = connection.openStream("shell,v2,raw:$command")
+                stream = runCatching { connection.openStream("shell,v2,raw:$command") }.getOrNull()
                     ?: return@withTimeout ShellCommandResult(
-                        exitCode = -1, stdout = "", stderr = "Failed to open shell_v2 stream", durationMs = 0L
+                        exitCode = -1, stdout = "", stderr = "Failed to open shell_v2 stream: connection inactive or failed", durationMs = 0L
                     )
 
                 activeStreams[sessionId] = stream
@@ -211,9 +211,9 @@ public class AdbShellClient(
         var stream: AdbStream? = null
         try {
             withTimeout(timeoutMs) {
-                stream = connection.openStream("exec:$wrappedCommand")
+                stream = runCatching { connection.openStream("exec:$wrappedCommand") }.getOrNull()
                     ?: return@withTimeout ShellCommandResult(
-                        exitCode = -1, stdout = "", stderr = "Failed to open exec stream", durationMs = 0L
+                        exitCode = -1, stdout = "", stderr = "Failed to open exec stream: connection inactive or failed", durationMs = 0L
                     )
 
                 activeStreams[sessionId] = stream
