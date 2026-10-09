@@ -17,7 +17,7 @@ public class AdbShellClient(
     @PublishedApi internal val connection: AdbConnection
 ) {
     public companion object {
-        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 16 * 1024
+        public const val DEFAULT_MAX_OUTPUT_BYTES: Int = 4 * 1024
         public const val DEFAULT_TIMEOUT_MS: Long = 15_000L
     }
 
@@ -27,7 +27,7 @@ public class AdbShellClient(
     private val activeStreams = ConcurrentHashMap<Long, AdbStream>()
 
     // ThreadLocal 复用 ShellV2Buffer，避免每次调用都 new Buffer
-    private val threadLocalBuffer = ThreadLocal.withInitial { ShellV2Buffer(16 * 1024) }
+    private val threadLocalBuffer = ThreadLocal.withInitial { ShellV2Buffer(4 * 1024) }
 
     /**
      * 主动根据 sessionId 关闭指定 Shell 持续流（如终止某个 logcat）
@@ -315,7 +315,7 @@ public class AdbShellClient(
 internal class LineBuffer(
     private val onLine: suspend (ByteArray) -> Unit
 ) {
-    private var buffer = ByteArray(8192)
+    private var buffer = ByteArray(2048)
     private var size = 0
 
     suspend fun append(src: ByteArray, offset: Int, length: Int) {
