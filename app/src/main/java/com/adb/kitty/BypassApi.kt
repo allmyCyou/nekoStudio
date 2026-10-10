@@ -34,10 +34,10 @@ class BypassApi : Application() {
         super.onCreate()
         NativeLibs.initNativeEngine(16 * 1024 * 1024)
     }
-    
+
     private val _trimMemoryEvents = MutableSharedFlow<Int>(extraBufferCapacity = 16)
     val trimMemoryEvents: Flow<Int> = _trimMemoryEvents.asSharedFlow()
-    
+
     @Suppress("DEPRECATION")
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)

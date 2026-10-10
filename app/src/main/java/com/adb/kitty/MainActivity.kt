@@ -1432,7 +1432,7 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    
+
     private fun handleQrGenCommand(cmd: String) {
         appendLog("[INFO] 扩展指令 >> $cmd")
         val arg = cmd.removePrefix("qr-gen ").trim()
@@ -1474,7 +1474,7 @@ class MainActivity : ComponentActivity() {
         }
         val fileInFlash = File(flashFolder, arg)
         val targetFile = if (fileInFlash.exists() && fileInFlash.isFile) fileInFlash else if (File(arg).exists() && File(arg).isFile) File(arg) else null
-    
+
         if (targetFile != null) {
             val result = QrCodeUtils.decodeQrCode(targetFile)
             if (result != null) { qrDecodeResult = result } 
@@ -1550,7 +1550,7 @@ class MainActivity : ComponentActivity() {
                                             chunkBuffer.add(line)
                                             val now = System.currentTimeMillis()
 
-                                            if (chunkBuffer.size >= 100 || (now - lastChunkTime >= 8)) {
+                                            if (chunkBuffer.size >= 30 || (now - lastChunkTime >= 8)) {
                                                 logChannel.send(ArrayList(chunkBuffer))
                                                 chunkBuffer.clear()
                                                 lastChunkTime = now
@@ -1576,7 +1576,7 @@ class MainActivity : ComponentActivity() {
                                 mainBuffer.addAll(batch)
 
                                 val now = System.currentTimeMillis()
-                                if (mainBuffer.size >= 200 || (now - lastFlushTime >= 8)) {
+                                if (mainBuffer.size >= 60 || (now - lastFlushTime >= 8)) {
                                     mainBuffer.forEach { appendLog(it) }
                                     mainBuffer.clear()
                                     lastFlushTime = now
