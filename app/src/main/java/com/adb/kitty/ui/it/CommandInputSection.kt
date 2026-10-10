@@ -14,6 +14,7 @@ import android.text.InputFilter
 import android.text.InputType
 import android.text.TextWatcher
 import android.view.MotionEvent
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import androidx.compose.foundation.interaction.FocusInteraction
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -141,6 +142,9 @@ fun <T> CommandInputSection(
                     modifier = Modifier.fillMaxWidth(),
                     factory = { context ->
                         EditText(context).apply {
+                            // 剥夺软键盘进入全屏模式的权利
+                            imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
+
                             background = null
                             setPadding(0, 0, 0, 0)
 
@@ -248,6 +252,9 @@ fun <T> CommandInputSection(
             visualTransformation = VisualTransformation.None,
             interactionSource = interactionSource,
             isError = false,
+            // 确保 EditText 自身能够正确托管触摸穿透和焦点
+            isFocusable = true
+            isFocusableInTouchMode = true
             label = {
                 Text(stringResource(R.string.action_menu_sospl))
             },

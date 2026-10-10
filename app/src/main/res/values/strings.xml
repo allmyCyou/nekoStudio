@@ -11,7 +11,7 @@
     <string name="action_menu_share">Quick sharing</string>
     <string name="action_menu_dellog">Clear console log</string>
     <string name="action_menu_help">help for use</string>
-    <string name="action_menu_log_export">Print the output log</string>
+    <string name="action_menu_log_export">Print full log</string>
     <string name="action_menu_neko_shell_stop">Terminate current shell process</string>
     <string name="action_menu_turbo">Start PerformanceHintManager</string>
     <string name="action_menu_turbo_stop">Stop PerformanceHintManager</string>

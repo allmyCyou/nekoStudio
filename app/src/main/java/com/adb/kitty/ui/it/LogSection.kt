@@ -94,8 +94,8 @@ class LogTextView @JvmOverloads constructor(
  * 安全获取 Native 日志快照（所有二进制解析、滑动窗口、文本拼接全部在 C++ 堆外完成）
  */
 fun getNativeLogSnapshot(): String {
-    // 限制最大返回 880 KB 的最新文本，保护 UI 渲染性能
-    return NativeLibs.getLogSnapshot(880 * 1024)
+    // 限制最大返回 720 KB 的最新文本，保护 UI 渲染性能
+    return NativeLibs.getLogSnapshot(720 * 1024)
 }
 
 @Keep

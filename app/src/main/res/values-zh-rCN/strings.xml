@@ -9,7 +9,7 @@
     <string name="action_menu_share">快捷分享</string>
     <string name="action_menu_dellog">清空控制台日志</string>
     <string name="action_menu_help">使用说明</string>
-    <string name="action_menu_log_export">打印已输出的日志</string>
+    <string name="action_menu_log_export">打印完整日志</string>
     <string name="action_menu_neko_shell_stop">终止当前 Shell 进程</string>
     <string name="action_menu_turbo">启动性能提示管理器</string>
     <string name="action_menu_turbo_stop">还原性能提示管理器</string>
