@@ -29,7 +29,7 @@ spake2 = "2.2.1"
 jdklibs = "2.1.5"
 libsuVersion = "6.0.0"
 
-hiddenapibypassVersion = "6.1"
+hiddenapibypassVersion = "6.2"
 nayukiQR = "1.8.0"
 lifecycle = "2.11.0"
 
