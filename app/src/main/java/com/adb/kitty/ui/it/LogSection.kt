@@ -8,6 +8,8 @@ import com.adb.kitty.*
 import com.adb.kitty.service.*
 import com.adb.kitty.R
 
+import android.os.Bundle
+import android.os.Build
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Rect
@@ -53,6 +55,16 @@ class LogTextView @JvmOverloads constructor(
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
 ) : TextView(context, attrs, defStyleAttr) {
+
+    init {
+        // 避免获取焦点时强制拉起软键盘
+        setShowSoftInputOnFocus(false)
+    }
+
+    // 彻底阻断输入法连接，防止软键盘线程与主线程争夺资源导致卡死
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+        return null
+    }
 
     override fun sendAccessibilityEventUnchecked(event: AccessibilityEvent?) {
         if (event?.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ||
