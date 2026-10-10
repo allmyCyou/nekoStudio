@@ -142,6 +142,10 @@ fun <T> CommandInputSection(
                     modifier = Modifier.fillMaxWidth(),
                     factory = { context ->
                         EditText(context).apply {
+                            // 确保 EditText 自身能够正确托管触摸穿透和焦点
+                            isFocusable = true
+                            isFocusableInTouchMode = true
+
                             // 剥夺软键盘进入全屏模式的权利
                             imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
 
@@ -252,9 +256,6 @@ fun <T> CommandInputSection(
             visualTransformation = VisualTransformation.None,
             interactionSource = interactionSource,
             isError = false,
-            // 确保 EditText 自身能够正确托管触摸穿透和焦点
-            isFocusable = true
-            isFocusableInTouchMode = true
             label = {
                 Text(stringResource(R.string.action_menu_sospl))
             },
