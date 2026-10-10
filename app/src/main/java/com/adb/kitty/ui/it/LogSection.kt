@@ -61,6 +61,9 @@ class LogTextView @JvmOverloads constructor(
     init {
         // 避免获取焦点时强制拉起软键盘
         setShowSoftInputOnFocus(false)
+
+        // 禁用状态自动保存与恢复，避免长文本序列化开销与内存抖动
+        isSaveEnabled = false
     }
 
     // 彻底阻断输入法连接，防止软键盘线程与主线程争夺资源导致卡死
