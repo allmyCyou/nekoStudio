@@ -23,6 +23,8 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.accessibility.AccessibilityEvent
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.widget.HorizontalScrollView
 import android.widget.TextView
 import androidx.annotation.Keep
@@ -62,7 +64,7 @@ class LogTextView @JvmOverloads constructor(
     }
 
     // 彻底阻断输入法连接，防止软键盘线程与主线程争夺资源导致卡死
-    override fun onCreateInputConnection(outAttrs: EditorInfo?): InputConnection? {
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         return null
     }
 
