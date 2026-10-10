@@ -87,18 +87,22 @@ fun CompletePerformanceMonitorBottomSheet(
                         )
                     }
 
-                    Text(
-                        text = if (uiState.isRootConnected) "ROOT ACTIVE" else "WAIT",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = if (uiState.isRootConnected) Color(0xFFFF5252) else Color.Gray,
-                        modifier = Modifier
-                            .background(
-                                (if (uiState.isRootConnected) Color(0xFFFF5252) else Color.Gray).copy(alpha = 0.12f),
-                                RoundedCornerShape(4.dp)
-                            )
-                            .padding(horizontal = 6.dp, vertical = 4.dp)
-                    )
+                    Button(
+                        onClick = {
+                            onDismissRequest()
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                        modifier = Modifier.height(30.dp)
+                    ) {
+                        Text(
+                            text = "❌主动解绑",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
 
