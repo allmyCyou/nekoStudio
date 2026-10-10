@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <cstdint>
+#include <fstream>
 
 inline void safe_malloc_trim() {
     typedef int (*malloc_trim_fn)(size_t);
@@ -97,6 +98,82 @@ public:
             madvise(off_heap_buffer.data(), capacity, MADV_DONTNEED);
         }
     }
+
+    std::string get_snapshot_text(size_t max_bytes) {
+        size_t current_write = write_pos.load(std::memory_order_acquire);
+        if (current_write == 0 || current_write > capacity) return "";
+
+        const char* base_ptr = off_heap_buffer.data();
+        size_t offset = 0;
+        const uint32_t kMagic = 0x4C4F4753; // "LOGS"
+
+        // 使用 string_view 引用堆外内存，零额外内存分配
+        std::vector<std::string_view> blocks;
+
+        // 1. 在 C++ 堆外直接解析二进制头部，提取所有合法日志块
+        while (offset + sizeof(LogHeader) <= current_write) {
+            const LogHeader* header = reinterpret_cast<const LogHeader*>(base_ptr + offset);
+            if (header->magic != kMagic || header->length == 0 || offset + sizeof(LogHeader) + header->length > current_write) {
+                break; // 遇到无效数据或空白区，停止
+            }
+
+            const char* content_ptr = base_ptr + offset + sizeof(LogHeader);
+            blocks.emplace_back(content_ptr, header->length);
+            offset += sizeof(LogHeader) + header->length;
+        }
+
+        // 2. 在 C++ 内部计算滑动窗口（从后往前，只取最近的 max_bytes）
+        size_t total_size = 0;
+        size_t start_index = blocks.size();
+        for (long long i = static_cast<long long>(blocks.size()) - 1; i >= 0; --i) {
+            if (total_size + blocks[i].size() > max_bytes && !blocks.empty()) {
+                break;
+            }
+            total_size += blocks[i].size();
+            start_index = i;
+        }
+
+        // 3. 在 C++ 内存中一次性拼接最终文本
+        std::string result;
+        result.reserve(total_size);
+        for (size_t i = start_index; i < blocks.size(); ++i) {
+            result.append(blocks[i].data(), blocks[i].size());
+        }
+
+        return result;
+    }
+
+    // 新增：在 C++ 堆外直接解析并写入文件，零 JVM 内存消耗
+    bool export_to_file(const char* filepath) {
+        size_t current_write = write_pos.load(std::memory_order_acquire);
+
+        // 打开目标文件（二进制模式写入）
+        std::ofstream outfile(filepath, std::ios::out | std::ios::binary);
+        if (!outfile.is_open()) return false;
+
+        if (current_write == 0 || current_write > capacity) {
+            return true; // 缓冲区为空，直接生成空文件
+        }
+
+        const char* base_ptr = off_heap_buffer.data();
+        size_t offset = 0;
+        const uint32_t kMagic = 0x4C4F4753; // "LOGS"
+
+        // 循环解析二进制块，直接写入文件流
+        while (offset + sizeof(LogHeader) <= current_write) {
+            const LogHeader* header = reinterpret_cast<const LogHeader*>(base_ptr + offset);
+            if (header->magic != kMagic || header->length == 0 || offset + sizeof(LogHeader) + header->length > current_write) {
+                break; // 遇到无效数据或空白区，停止
+            }
+
+            const char* content_ptr = base_ptr + offset + sizeof(LogHeader);
+            outfile.write(content_ptr, header->length);
+            offset += sizeof(LogHeader) + header->length;
+        }
+
+        outfile.flush();
+        return outfile.good();
+    }
 };
 
 static std::unique_ptr<NativeLogEngine> g_log_engine = nullptr;
@@ -146,6 +223,13 @@ Java_com_adb_kitty_data_NativeLibs_getWriteOffset(JNIEnv* env, jobject thiz) {
     return g_log_engine ? static_cast<jlong>(g_log_engine->get_write_offset()) : 0L;
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_adb_kitty_data_NativeLibs_getLogSnapshot(JNIEnv* env, jobject thiz, jint max_bytes) {
+    if (!g_log_engine) return env->NewStringUTF("");
+    std::string text = g_log_engine->get_snapshot_text(static_cast<size_t>(max_bytes));
+    return env->NewStringUTF(text.c_str());
+}
+
 JNIEXPORT void JNICALL
 Java_com_adb_kitty_data_NativeLibs_clearNativeBuffer(JNIEnv* env, jobject thiz) {
     if (g_log_engine) {
@@ -159,6 +243,19 @@ Java_com_adb_kitty_data_NativeLibs_releaseNativeEngine(JNIEnv* env, jobject thiz
         g_log_engine.reset();
         safe_malloc_trim();
     }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_adb_kitty_data_NativeLibs_exportLogToFile(JNIEnv* env, jobject thiz, jstring file_path) {
+    if (!g_log_engine || !file_path) return JNI_FALSE;
+
+    const char* path_chars = env->GetStringUTFChars(file_path, nullptr);
+    if (!path_chars) return JNI_FALSE;
+
+    bool success = g_log_engine->export_to_file(path_chars);
+
+    env->ReleaseStringUTFChars(file_path, path_chars);
+    return success ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

@@ -70,6 +70,11 @@ object NativeLibs {
     external fun getWriteOffset(): Long
 
     /**
+     * C++ 堆外内存自处理，不沾 JVM 内存堆
+     */
+    external fun getLogSnapshot(maxBytes: Int): String
+
+    /**
      * 清空 Native 堆外内存（利用 madvise 实时归还物理内存，保持虚拟地址映射）
      */
     external fun clearNativeBuffer()
@@ -78,21 +83,26 @@ object NativeLibs {
      * 彻底销毁 Native 引擎并强行归还堆内存到 Linux 内核（调用 malloc_trim）
      */
     external fun releaseNativeEngine()
-    
+
+    /*
+     * 导出 C++ 堆外内存的 16MB 内存堆里的日志
+     */
+    external fun exportLogToFile(filePath: String): Boolean
+
     @JvmStatic
     external fun getRawIdentityInfo(): IntArray?
 
     @JvmStatic
     external fun getSelinuxContext(): String?
-    
+
     external fun ApkSignature(apkPath: String): String
-    
+
     external fun hasV1Scheme(apkPath: String): Boolean
     external fun hasV2Scheme(apkPath: String): Boolean
     external fun hasV3Scheme(apkPath: String): Boolean
     external fun hasV31Scheme(apkPath: String): Boolean
     external fun hasV32Scheme(apkPath: String): Boolean
-    
+
     fun getSupportedSchemesText(apkPath: String): String {
         val schemes = mutableListOf<String>()
         if (hasV1Scheme(apkPath)) schemes.add("V1")

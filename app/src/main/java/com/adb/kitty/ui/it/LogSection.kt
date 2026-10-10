@@ -74,39 +74,11 @@ class LogTextView @JvmOverloads constructor(
 }
 
 /**
- * 安全读取 Native 堆外日志，解析 LogHeader 剥离二进制元数据，转为纯文本 String
+ * 安全获取 Native 日志快照（所有二进制解析、滑动窗口、文本拼接全部在 C++ 堆外完成）
  */
 fun getNativeLogSnapshot(): String {
-    val buffer = NativeLibs.getDirectBuffer() ?: return ""
-    val writeOffset = NativeLibs.getWriteOffset().toInt().coerceAtMost(buffer.capacity())
-    if (writeOffset <= 0) return ""
-
-    val duplicate = buffer.duplicate().apply {
-        // 关键：Android Native (ARM) 是小端序，必须显式让 ByteBuffer 匹配，否则 int 读取会错乱
-        order(ByteOrder.LITTLE_ENDIAN)
-        position(0)
-        limit(writeOffset)
-    }
-
-    val kMagic = 0x4C4F4753 // "LOGS" 魔数
-    val sb = StringBuilder()
-
-    // 循环解析二进制日志块
-    while (duplicate.remaining() >= 8) {
-        val length = duplicate.int
-        val magic = duplicate.int
-
-        // 如果魔数不匹配、长度异常、或者剩余空间不足，说明读到了未写入的空白区
-        if (magic != kMagic || length <= 0 || duplicate.remaining() < length) {
-            break
-        }
-
-        val logBytes = ByteArray(length)
-        duplicate.get(logBytes)
-        sb.append(String(logBytes, Charsets.UTF_8))
-    }
-
-    return sb.toString()
+    // 限制最大返回 880 KB 的最新文本，保护 UI 渲染性能
+    return NativeLibs.getLogSnapshot(880 * 1024)
 }
 
 @Keep
