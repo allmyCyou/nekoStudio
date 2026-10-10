@@ -752,7 +752,7 @@
         android:usesNonSdkApi="true"
         android:usesCleartextTraffic="true"
         android:resizeableActivity="true"
-        android:appCategory="productivity"
+        android:appCategory="game"
         android:hardwareAccelerated="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:enableOnBackInvokedCallback="true"
@@ -764,6 +764,9 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme"
         tools:targetApi="37">
+        <meta-data
+            android:name="android.app.game_mode_config"
+            android:resource="@xml/game_mode_config" />
         <!-- uses-native-library Android 12+ -->
         <uses-native-library
             android:name="com.android.future.usb.accessory"

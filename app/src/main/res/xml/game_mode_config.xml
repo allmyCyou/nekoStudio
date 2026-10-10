@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<game-mode-config
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:supportsPerformanceGameMode="true"
+    android:supportsBatteryGameMode="true" />
