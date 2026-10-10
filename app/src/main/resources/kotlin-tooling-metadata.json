@@ -8,7 +8,7 @@
     "kotlinxCoroutines": "1.11.0",
     "OpenSSL": "4.0.3",
     "composeBom": "2026.09.00",
-    "org.lsposed.hiddenapibypass": "6.1",
+    "org.lsposed.hiddenapibypass": "6.2",
     "com.github.topjohnwu.libsu": "6.0.0",
     "nayukiQR": "1.8.0",
     "zxingCode": "3.5.4"
