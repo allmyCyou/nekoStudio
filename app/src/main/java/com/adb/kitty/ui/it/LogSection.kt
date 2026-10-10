@@ -62,7 +62,7 @@ class LogTextView @JvmOverloads constructor(
     }
 
     // 彻底阻断输入法连接，防止软键盘线程与主线程争夺资源导致卡死
-    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
+    override fun onCreateInputConnection(outAttrs: EditorInfo?): InputConnection? {
         return null
     }
 
