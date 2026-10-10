@@ -290,6 +290,13 @@ class PerformanceViewModel : ViewModel() {
         }
     }
 
+    fun unRootService() {
+        rootJob?.cancel()
+        try {
+            RootService.unbind(serviceConnection)
+        } catch (e: Exception) { }
+    }
+
     private fun readProcNetDev(): Pair<RawNetStats, RawNetStats> {
         val binder = rootBinder ?: return Pair(RawNetStats(), RawNetStats())
         return try {

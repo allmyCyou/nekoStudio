@@ -450,7 +450,12 @@ class MainActivity : ComponentActivity() {
                             val fileName = "perf_log_${System.currentTimeMillis()}.csv"
                             createCsvLauncher.launch(fileName)
                         },
-                        onDismissRequest = { showCpuBottomSheet = false }
+                        onDismissRequest = {
+                            showCpuBottomSheet = false
+                        },
+                        onUnbinRoot = {
+                            pviewModel.unRootService()
+                        }
                     )
                 }
 

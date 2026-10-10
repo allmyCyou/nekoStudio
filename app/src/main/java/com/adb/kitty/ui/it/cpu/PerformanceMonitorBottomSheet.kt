@@ -38,7 +38,8 @@ fun CompletePerformanceMonitorBottomSheet(
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit,
     onExportCsv: (csvContent: String) -> Unit,
-    onDismissRequest: () -> Unit
+    onDismissRequest: () -> Unit,
+    onUnbinRoot: () -> Unit
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismissRequest,
@@ -60,7 +61,7 @@ fun CompletePerformanceMonitorBottomSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "⚡ Qualcomm 硬件性能监控",
+                    text = "Qualcomm 硬件性能监控",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -89,7 +90,7 @@ fun CompletePerformanceMonitorBottomSheet(
 
                     Button(
                         onClick = {
-                            onDismissRequest()
+                            onUnbinRoot()
                         },
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary
@@ -98,7 +99,7 @@ fun CompletePerformanceMonitorBottomSheet(
                         modifier = Modifier.height(30.dp)
                     ) {
                         Text(
-                            text = "❌主动解绑",
+                            text = "解绑 Root",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold
                         )
