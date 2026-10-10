@@ -3,11 +3,11 @@ package libs.libs.libs.adb.shell
 /**
  * 零 JVM 堆分配 Shell V2 解析缓冲区
  */
-public class ShellV2Buffer(initialCapacity: Int = 4 * 1024) {
+public class ShellV2Buffer(initialCapacity: Int = 16 * 1024) {
     @PublishedApi
     internal companion object {
         @PublishedApi
-        internal const val MAX_PAYLOAD_SIZE: Int = 16 * 1024 // 16 KB
+        internal const val MAX_PAYLOAD_SIZE: Int = 8 * 1024 * 1024
     }
 
     @PublishedApi
