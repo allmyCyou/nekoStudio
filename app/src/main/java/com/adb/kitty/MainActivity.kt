@@ -44,6 +44,7 @@ import kotlin.*
 import kotlin.coroutines.*
 import kotlin.math.*
 import kotlin.system.*
+import kotlin.time.Duration.Companion.milliseconds
 
 import java.io.*
 import java.nio.*
@@ -946,6 +947,7 @@ class MainActivity : ComponentActivity() {
         appendLog("[INFO] Updated console title to: $newTitle")
     }
 
+    @OptIn(FlowPreview::class)
     private fun handleAdbCommand(adbCmd: String) {
         // 在调用此方法之前 adb 就已经被 cmd.removePrefix("adb ").trim()，所以后续只需要识别 adb 后面的参数即可
         val client = adbService?.safeAdbClient
@@ -1112,7 +1114,9 @@ class MainActivity : ComponentActivity() {
                         activeSessionJob = lifecycleScope.launch {
                             try {
                                 // 慢速模式
-                                streamFlow.sample(200.milliseconds).collect { chunk ->
+                                streamFlow
+                                    .sample(200.milliseconds)
+                                    .collect { chunk ->
                                     // chunk.data 已是 LineBuffer 剥离了 \n/\r\n 的单行字节数组
                                     val line = String(chunk.data, Charsets.UTF_8)
                                     if (line.isNotEmpty()) {
