@@ -193,7 +193,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * 文件导出：利用 NIO FileChannel 将 Native 堆外内存一键落盘（物理层零拷贝）
+     * 文件导出：解析 C++ 二进制头部（必须显式指定小端序），剥离 LogHeader，将纯文本日志一键落盘
      */
     suspend fun exportFullLogToFile(targetFile: File): Boolean = withContext(Dispatchers.IO) {
         runCatching {
@@ -201,13 +201,32 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
             val writeOffset = NativeLibs.getWriteOffset().toInt()
             if (writeOffset <= 0) return@withContext false
 
-            FileOutputStream(targetFile).channel.use { channel ->
-                val readSlice = buffer.duplicate().apply {
-                    position(0)
-                    limit(writeOffset.coerceAtMost(capacity()))
-                }
-                channel.write(readSlice)
+            val duplicate = buffer.duplicate().apply {
+                // 关键：与 C++ (ARM) 保持一致，必须使用小端序解析整型头部
+                order(ByteOrder.LITTLE_ENDIAN)
+                position(0)
+                limit(writeOffset.coerceAtMost(capacity()))
             }
+
+            val kMagic = 0x4C4F4753 // "LOGS" 魔数
+            val sb = StringBuilder()
+
+            // 循环遍历解析所有合法的日志块
+            while (duplicate.remaining() >= 8) {
+                val length = duplicate.int
+                val magic = duplicate.int
+
+                if (magic != kMagic || length <= 0 || duplicate.remaining() < length) {
+                    break
+                }
+
+                val logBytes = ByteArray(length)
+                duplicate.get(logBytes)
+                sb.append(String(logBytes, Charsets.UTF_8))
+            }
+
+            // 写入目标文件
+            targetFile.writeText(sb.toString(), Charsets.UTF_8)
             true
         }.getOrDefault(false)
     }

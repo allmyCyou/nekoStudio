@@ -73,19 +73,39 @@ class LogTextView @JvmOverloads constructor(
 }
 
 /**
- * 安全读取 Native UTF-8 字节并转为标准 JVM String
+ * 安全读取 Native 堆外日志，解析 LogHeader 剥离二进制元数据，转为纯文本 String
  */
 fun getNativeLogSnapshot(): String {
     val buffer = NativeLibs.getDirectBuffer() ?: return ""
     val writeOffset = NativeLibs.getWriteOffset().toInt().coerceAtMost(buffer.capacity())
     if (writeOffset <= 0) return ""
 
-    val bytes = ByteArray(writeOffset)
-    val duplicate = buffer.duplicate()
-    duplicate.position(0)
-    duplicate.get(bytes, 0, writeOffset)
-    
-    return String(bytes, Charsets.UTF_8)
+    val duplicate = buffer.duplicate().apply {
+        // 关键：Android Native (ARM) 是小端序，必须显式让 ByteBuffer 匹配，否则 int 读取会错乱
+        order(ByteOrder.LITTLE_ENDIAN)
+        position(0)
+        limit(writeOffset)
+    }
+
+    val kMagic = 0x4C4F4753 // "LOGS" 魔数
+    val sb = StringBuilder()
+
+    // 循环解析二进制日志块
+    while (duplicate.remaining() >= 8) {
+        val length = duplicate.int
+        val magic = duplicate.int
+
+        // 如果魔数不匹配、长度异常、或者剩余空间不足，说明读到了未写入的空白区
+        if (magic != kMagic || length <= 0 || duplicate.remaining() < length) {
+            break
+        }
+
+        val logBytes = ByteArray(length)
+        duplicate.get(logBytes)
+        sb.append(String(logBytes, Charsets.UTF_8))
+    }
+
+    return sb.toString()
 }
 
 @Keep
@@ -284,7 +304,7 @@ fun LogSection(
 
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             uiUpdateVersionFlow
-                .sample(100.milliseconds)
+                .sample(120.milliseconds)
                 .collect {
                     // 在后台线程安全提取快照并解码 UTF-8
                     val logText = withContext(Dispatchers.Default) {
