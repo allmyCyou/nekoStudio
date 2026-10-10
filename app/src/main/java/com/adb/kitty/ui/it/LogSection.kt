@@ -305,7 +305,7 @@ fun LogSection(
 
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             uiUpdateVersionFlow
-                .sample(120.milliseconds)
+                .sample(170.milliseconds)
                 .collect {
                     // 在后台线程安全提取快照并解码 UTF-8
                     val logText = withContext(Dispatchers.Default) {
