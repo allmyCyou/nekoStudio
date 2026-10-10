@@ -1,5 +1,5 @@
 # 
-prefix=/root/openssl-4.0.2/android_build/x86_64
+prefix=/root/openssl-4.0.3/android_build/x86_64
 exec_prefix=${prefix}
 libdir=${exec_prefix}/lib
 includedir=${prefix}/include
@@ -7,7 +7,7 @@ modulesdir=${libdir}/ossl-modules
 
 Name: OpenSSL-libcrypto
 Description: OpenSSL cryptography library
-Version: 4.0.2
+Version: 4.0.3
 Libs: -L${libdir} -lcrypto
 Libs.private: -ldl -pthread
 Cflags: -I${includedir}

@@ -6,7 +6,7 @@
   "projectSettings": {
     "androidGradlePlugin": "9.5.0-alpha09",
     "kotlinxCoroutines": "1.11.0",
-    "OpenSSL": "4.0.2",
+    "OpenSSL": "4.0.3",
     "composeBom": "2026.09.00",
     "org.lsposed.hiddenapibypass": "6.1",
     "com.github.topjohnwu.libsu": "6.0.0",
