@@ -17,7 +17,7 @@ inline void safe_malloc_trim() {
     }
 }
 
-// 日志块头部元数据
+// 日志块头部元数据，用于无锁解析变长数据
 struct LogHeader {
     uint32_t length;
     uint32_t magic;
@@ -41,25 +41,39 @@ public:
         safe_malloc_trim();
     }
 
-    // 批量写入全局环形缓冲区（由线程本地缓存满时触发）
-    bool append_batch(const char* data, size_t size) {
-        if (size == 0 || size > capacity) return false;
+    // 每次写入直接原子抢占全局缓冲区，保证 UI 实时可见
+    void append_fast(std::string_view raw_log, bool auto_newline = true) {
+        size_t len = raw_log.size();
+        if (len == 0) return;
+
+        size_t total_len = len + (auto_newline ? 1 : 0);
+        size_t needed = total_len + sizeof(LogHeader);
+        if (needed > capacity) return; // 单条日志超限
 
         while (true) {
             size_t current = write_pos.load(std::memory_order_relaxed);
             
-            // 空间不足，原子 CAS 尝试回滚到 0
-            if (current + size > capacity) {
+            // 空间不足时，通过原子 CAS 尝试将写指针重置回 0
+            if (current + needed > capacity) {
                 if (write_pos.compare_exchange_weak(current, 0, std::memory_order_release, std::memory_order_relaxed)) {
-                    continue;
+                    continue; // 重置成功，重新循环从头抢占
                 }
-                continue;
+                continue; // 抢占失败，有其他线程修改了，重试
             }
 
-            // 原子抢占整批空间
-            if (write_pos.compare_exchange_weak(current, current + size, std::memory_order_release, std::memory_order_relaxed)) {
-                std::memcpy(off_heap_buffer.data() + current, data, size);
-                return true;
+            // 原子抢占当前片段空间
+            if (write_pos.compare_exchange_weak(current, current + needed, std::memory_order_release, std::memory_order_relaxed)) {
+                // 抢占成功，安全写入对应位置
+                LogHeader* header = reinterpret_cast<LogHeader*>(off_heap_buffer.data() + current);
+                header->length = static_cast<uint32_t>(total_len);
+                header->magic = kMagic;
+
+                char* dest = off_heap_buffer.data() + current + sizeof(LogHeader);
+                std::memcpy(dest, raw_log.data(), len);
+                if (auto_newline) {
+                    dest[len] = '\n';
+                }
+                break;
             }
         }
     }
@@ -85,82 +99,6 @@ public:
     }
 };
 
-// 线程本地日志缓冲区（Thread-Local Buffer）
-class ThreadLocalLogBuffer {
-private:
-    NativeLogEngine* engine;
-    std::vector<char> buffer;
-    size_t capacity;
-    size_t current_pos;
-    const uint32_t kMagic = 0x4C4F4753;
-
-public:
-    explicit ThreadLocalLogBuffer(NativeLogEngine* eng, size_t cap = 4096) 
-        : engine(eng), capacity(cap), current_pos(0) {
-        buffer.resize(capacity, 0);
-    }
-
-    ~ThreadLocalLogBuffer() {
-        flush(); // 线程退出时自动清理剩余日志到全局
-    }
-
-    void append(std::string_view raw_log, bool auto_newline) {
-        size_t len = raw_log.size();
-        if (len == 0) return;
-
-        size_t total_len = len + (auto_newline ? 1 : 0);
-        size_t needed = total_len + sizeof(LogHeader);
-
-        // 如果单条日志超出了整个本地缓存容量，直接绕过本地，单独强行提交
-        if (needed > capacity) {
-            flush(); // 先刷出积压的
-            std::vector<char> temp_chunk(needed);
-            LogHeader* header = reinterpret_cast<LogHeader*>(temp_chunk.data());
-            header->length = static_cast<uint32_t>(total_len);
-            header->magic = kMagic;
-            char* dest = temp_chunk.data() + sizeof(LogHeader);
-            std::memcpy(dest, raw_log.data(), len);
-            if (auto_newline) {
-                dest[len] = '\n';
-            }
-            engine->append_batch(temp_chunk.data(), needed);
-            return;
-        }
-
-        // 如果本地缓存空间不够，先触发一次 Flush 提交到全局
-        if (current_pos + needed > capacity) {
-            flush();
-        }
-
-        // 写入线程本地缓冲区
-        LogHeader* header = reinterpret_cast<LogHeader*>(buffer.data() + current_pos);
-        header->length = static_cast<uint32_t>(total_len);
-        header->magic = kMagic;
-
-        char* dest = buffer.data() + current_pos + sizeof(LogHeader);
-        std::memcpy(dest, raw_log.data(), len);
-        if (auto_newline) {
-            dest[len] = '\n';
-        }
-        current_pos += needed;
-    }
-
-    void flush() {
-        if (current_pos == 0 || !engine) return;
-        engine->append_batch(buffer.data(), current_pos);
-        current_pos = 0;
-    }
-};
-
-// 获取当前线程私有的 ThreadLocalLogBuffer 实例
-inline ThreadLocalLogBuffer* get_thread_local_buffer(NativeLogEngine* engine) {
-    thread_local std::unique_ptr<ThreadLocalLogBuffer> tls_buf = nullptr;
-    if (!tls_buf && engine) {
-        tls_buf = std::make_unique<ThreadLocalLogBuffer>(engine, 4096); // 每个线程分配 4KB 本地缓存
-    }
-    return tls_buf.get();
-}
-
 static std::unique_ptr<NativeLogEngine> g_log_engine = nullptr;
 
 extern "C" {
@@ -184,10 +122,7 @@ Java_com_adb_kitty_data_NativeLibs_appendNativeLog(JNIEnv* env, jobject thiz, js
     jsize len = env->GetStringUTFLength(log_str);
 
     if (chars) {
-        auto tls = get_thread_local_buffer(g_log_engine.get());
-        if (tls) {
-            tls->append(std::string_view(chars, static_cast<size_t>(len)), true);
-        }
+        g_log_engine->append_fast(std::string_view(chars, static_cast<size_t>(len)), true);
         env->ReleaseStringUTFChars(log_str, chars);
     }
 }
@@ -201,10 +136,7 @@ Java_com_adb_kitty_data_NativeLibs_appendNativeLogBytes(JNIEnv* env, jobject thi
 
     jbyte* buffer = static_cast<jbyte*>(env->GetPrimitiveArrayCritical(bytes, nullptr));
     if (buffer) {
-        auto tls = get_thread_local_buffer(g_log_engine.get());
-        if (tls) {
-            tls->append(std::string_view(reinterpret_cast<const char*>(buffer), static_cast<size_t>(len)), true);
-        }
+        g_log_engine->append_fast(std::string_view(reinterpret_cast<const char*>(buffer), static_cast<size_t>(len)), true);
         env->ReleasePrimitiveArrayCritical(bytes, buffer, JNI_ABORT);
     }
 }

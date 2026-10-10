@@ -43,7 +43,7 @@ object NativeLibs {
     }
     /**
      * 初始化 C++17 堆外内存引擎
-     * @param capacity 堆外内存容量（字节），例如 12 * 1024 * 1024 (12MB)
+     * @param capacity 堆外内存容量（字节），例如 16 * 1024 * 1024 (16MB)
      */
     external fun initNativeEngine(capacity: Int)
 
