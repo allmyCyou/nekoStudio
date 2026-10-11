@@ -475,7 +475,7 @@ fun CenterAlignedTopAppBarExample(
             )
         },
     ) { innerPadding ->
-        Column(modifier = Modifier.padding(innerPadding).padding(16.dp).fillMaxSize()) {
+        Column(modifier = Modifier.padding(innerPadding).padding(12.dp).fillMaxSize()) {
 
             CommandInputSection(
                 query = query,
@@ -494,7 +494,7 @@ fun CenterAlignedTopAppBarExample(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(top = 4.dp)
+                    .padding(top = 2.dp)
             )
             
             IdentityFooterSection()
