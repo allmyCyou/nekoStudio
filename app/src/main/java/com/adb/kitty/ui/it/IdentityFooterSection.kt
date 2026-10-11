@@ -20,27 +20,29 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import java.lang.management.ManagementFactory
 
-// 1. 数据类仅保留初始堆和最大堆配置
-data class JvmHeapConfig(
-    val initialHeapMb: Long, // 对应 -Xms
-    val maxHeapMb: Long       // 对应 -Xmx
+// 1. 定义存储 JVM 堆内存信息的数据类
+data class JvmHeapIdentity(
+    val totalMemoryMb: Long,
+    val freeMemoryMb: Long,
+    val usedMemoryMb: Long,
+    val maxMemoryMb: Long
 ) {
     companion object {
-        fun current(): JvmHeapConfig {
-            // 使用 JMX 的 MemoryMXBean 获取精确配置
-            val memoryMXBean = ManagementFactory.getMemoryMXBean()
-            val heapMemoryUsage = memoryMXBean.heapMemoryUsage
+        fun current(): JvmHeapIdentity {
+            val runtime = Runtime.getRuntime()
+            
+            // 获取字节大小并转换为 MB
+            val total = runtime.totalMemory() / 1024 / 1024
+            val free = runtime.freeMemory() / 1024 / 1024
+            val max = runtime.maxMemory() / 1024 / 1024
+            val used = total - free
 
-            // init 是 JVM 启动时向系统申请的初始内存 (-Xms)
-            // max 是 JVM 能够使用的最大内存 (-Xmx)
-            val initialBytes = heapMemoryUsage.init
-            val maxBytes = heapMemoryUsage.max
-
-            return JvmHeapConfig(
-                initialHeapMb = if (initialBytes > 0) initialBytes / 1024 / 1024 else -1,
-                maxHeapMb = if (maxBytes > 0) maxBytes / 1024 / 1024 else -1
+            return JvmHeapIdentity(
+                totalMemoryMb = total,
+                freeMemoryMb = free,
+                usedMemoryMb = used,
+                maxMemoryMb = max
             )
         }
     }
@@ -48,8 +50,8 @@ data class JvmHeapConfig(
 
 @Composable
 fun IdentityFooterSection(modifier: Modifier = Modifier) {
-    // 2. 静态配置值，使用 remember 只在初始化时读取一次即可
-    val heapConfig = remember { JvmHeapConfig.current() }
+    // 2. 记住当前的 JVM 堆快照信息
+    val heapInfo = remember { JvmHeapIdentity.current() }
 
     Box(
         modifier = modifier
@@ -62,25 +64,39 @@ fun IdentityFooterSection(modifier: Modifier = Modifier) {
             modifier = Modifier
                 .fillMaxSize()
                 .horizontalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.Center // 只有两行，居中布局更美观
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // 3. 仅展示 -Xms
+            // 3. 替换为堆内存信息的文本展示
             Text(
-                text = "Initial Heap (-Xms): ${if (heapConfig.initialHeapMb > 0) "${heapConfig.initialHeapMb} MB" else "Undefined"}",
+                text = "Total Heap: ${heapInfo.totalMemoryMb} MB",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                lineHeight = 14.sp,
+                lineHeight = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(modifier = Modifier.height(4.dp))
-            // 4. 仅展示 -Xmx
             Text(
-                text = "Max Heap (-Xmx): ${if (heapConfig.maxHeapMb > 0) "${heapConfig.maxHeapMb} MB" else "Undefined"}",
+                text = "Used Heap: ${heapInfo.usedMemoryMb} MB",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                lineHeight = 14.sp,
+                lineHeight = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "Free Heap: ${heapInfo.freeMemoryMb} MB",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "Max Heap (-Xmx): ${heapInfo.maxMemoryMb} MB",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
