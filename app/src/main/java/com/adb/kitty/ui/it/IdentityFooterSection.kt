@@ -71,7 +71,7 @@ fun IdentityFooterSection(modifier: Modifier = Modifier) {
             modifier = Modifier
                 .fillMaxSize()
                 .horizontalScroll(rememberScrollState()),
-            verticalArrangement = Alignment.BottomStart
+            verticalArrangement = Arrangement.Vertical
         ) {
             // 实时展示动态获取的堆内存信息
             Text(
