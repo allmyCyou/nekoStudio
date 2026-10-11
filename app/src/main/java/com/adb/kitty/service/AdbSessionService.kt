@@ -514,7 +514,7 @@ class AdbSessionService : Service() {
         val lastLog = synchronized(notificationLogs) {
             notificationLogs.lastOrNull()
         }
-        val line1Text = lastLog ?: "📡 Nullify"
+        val line1Text = lastLog ?: "unknown"
 
         val timeText = getString(R.string.action_service_aaj)
         val line2Text = "⏱️ $timeText: $contentText"
