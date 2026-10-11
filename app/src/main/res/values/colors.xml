@@ -2,4 +2,5 @@
 <resources>
     <color name="ic_launcher_background">#ffffff</color>
     <color name="ic_launcher_foreground">#000000</color>
+    <color name="ic_drawable_default_color">#000000</color>
 </resources>
