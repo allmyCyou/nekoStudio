@@ -71,11 +71,27 @@ fun IdentityFooterSection(modifier: Modifier = Modifier) {
             modifier = Modifier
                 .fillMaxSize()
                 .horizontalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Alignment.BottomStart
         ) {
             // 实时展示动态获取的堆内存信息
             Text(
                 text = "JVM: ${heapInfo.maxMemoryMb} MB | ${heapInfo.totalMemoryMb} MB | ${heapInfo.usedMemoryMb} MB | ${heapInfo.freeMemoryMb} MB",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "${BuildConfig.APPLICATION_ID}",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "Builds Type: ${BuildConfig.BUILD_TYPE}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
