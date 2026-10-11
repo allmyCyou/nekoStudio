@@ -99,6 +99,14 @@ fun IdentityFooterSection(modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
+                text = "${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE})",
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                lineHeight = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
                 text = "github@allmyCyou/nekoStudio",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
