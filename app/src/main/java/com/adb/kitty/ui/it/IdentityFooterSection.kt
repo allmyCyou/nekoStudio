@@ -20,45 +20,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.lang.management.ManagementFactory
 
-data class ProcessIdentity(
-    val uid: Int, val euid: Int, val suid: Int, val fsuid: Int,
-    val gid: Int, val egid: Int, val sgid: Int, val fsgid: Int,
-    val pid: Int, val ppid: Int, val tid: Int, val pgid: Int, val sid: Int,
-    val aid: Int,
-    val selinuxContext: String
+// 1. 数据类仅保留初始堆和最大堆配置
+data class JvmHeapConfig(
+    val initialHeapMb: Long, // 对应 -Xms
+    val maxHeapMb: Long       // 对应 -Xmx
 ) {
     companion object {
-        fun current(): ProcessIdentity {
-            val raw = NativeLibs.getRawIdentityInfo()
-            val selinux = NativeLibs.getSelinuxContext() ?: "unknown"
+        fun current(): JvmHeapConfig {
+            // 使用 JMX 的 MemoryMXBean 获取精确配置
+            val memoryMXBean = ManagementFactory.getMemoryMXBean()
+            val heapMemoryUsage = memoryMXBean.heapMemoryUsage
 
-            if (raw == null || raw.size < 14) {
-                return ProcessIdentity(
-                    uid = -1, euid = -1, suid = -1, fsuid = -1,
-                    gid = -1, egid = -1, sgid = -1, fsgid = -1,
-                    pid = -1, ppid = -1, tid = -1, pgid = -1, sid = -1,
-                    aid = -1,
-                    selinuxContext = selinux
-                )
-            }
+            // init 是 JVM 启动时向系统申请的初始内存 (-Xms)
+            // max 是 JVM 能够使用的最大内存 (-Xmx)
+            val initialBytes = heapMemoryUsage.init
+            val maxBytes = heapMemoryUsage.max
 
-            return ProcessIdentity(
-                uid = raw[0],
-                euid = raw[1],
-                suid = raw[2],
-                fsuid = raw[3],
-                gid = raw[4],
-                egid = raw[5],
-                sgid = raw[6],
-                fsgid = raw[7],
-                pid = raw[8],
-                ppid = raw[9],
-                tid = raw[10],
-                pgid = raw[11],
-                sid = raw[12],
-                aid = raw[13],
-                selinuxContext = selinux
+            return JvmHeapConfig(
+                initialHeapMb = if (initialBytes > 0) initialBytes / 1024 / 1024 else -1,
+                maxHeapMb = if (maxBytes > 0) maxBytes / 1024 / 1024 else -1
             )
         }
     }
@@ -66,7 +48,8 @@ data class ProcessIdentity(
 
 @Composable
 fun IdentityFooterSection(modifier: Modifier = Modifier) {
-    val identity = remember { ProcessIdentity.current() }
+    // 2. 静态配置值，使用 remember 只在初始化时读取一次即可
+    val heapConfig = remember { JvmHeapConfig.current() }
 
     Box(
         modifier = modifier
@@ -79,38 +62,25 @@ fun IdentityFooterSection(modifier: Modifier = Modifier) {
             modifier = Modifier
                 .fillMaxSize()
                 .horizontalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.Center // 只有两行，居中布局更美观
         ) {
+            // 3. 仅展示 -Xms
             Text(
-                text = "UID: ${identity.uid} | EUID: ${identity.euid} | SUID: ${identity.suid} | FSUID: ${identity.fsuid}",
+                text = "Initial Heap (-Xms): ${if (heapConfig.initialHeapMb > 0) "${heapConfig.initialHeapMb} MB" else "Undefined"}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                lineHeight = 12.sp,
+                lineHeight = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(4.dp))
+            // 4. 仅展示 -Xmx
             Text(
-                text = "GID: ${identity.gid} | EGID: ${identity.egid} | SGID: ${identity.sgid} | FSGID: ${identity.fsgid}",
+                text = "Max Heap (-Xmx): ${if (heapConfig.maxHeapMb > 0) "${heapConfig.maxHeapMb} MB" else "Undefined"}",
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                lineHeight = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                text = "PID: ${identity.pid} | PPID: ${identity.ppid} | TID: ${identity.tid} | PGID: ${identity.pgid} | SID: ${identity.sid} | AID: ${identity.aid}",
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                lineHeight = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                text = "SELinux: ${identity.selinuxContext}",
-                style = MaterialTheme.typography.bodySmall,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                lineHeight = 12.sp,
+                lineHeight = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
