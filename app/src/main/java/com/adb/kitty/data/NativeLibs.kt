@@ -89,12 +89,6 @@ object NativeLibs {
      */
     external fun exportLogToFile(filePath: String): Boolean
 
-    @JvmStatic
-    external fun getRawIdentityInfo(): IntArray?
-
-    @JvmStatic
-    external fun getSelinuxContext(): String?
-
     external fun ApkSignature(apkPath: String): String
 
     external fun hasV1Scheme(apkPath: String): Boolean
