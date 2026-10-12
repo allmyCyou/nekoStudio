@@ -827,12 +827,13 @@
             android:showForAllUsers="false"
             android:hardwareAccelerated="true"
             android:supportsPictureInPicture="true"
-            android:windowSoftInputMode="adjustPan"
+            android:colorMode="wideColorGamut"
+            android:windowSoftInputMode="stateUnspecified|adjustPan"
             android:canDisplayOnRemoteDevices="false"
             android:launchMode="singleInstancePerTask"
             android:persistableMode="persistNever"
             android:theme="@style/AppTheme"
-            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboard|keyboardHidden|uiMode|colorMode|locale|navigation|grammaticalGender|fontScale|fontWeightAdjustment|touchscreen|mcc|mnc"
             android:permission="com.adb.kitty.USE_PRIVATE_API"
             android:exported="true">
             <!-- USB主机模式 -->
