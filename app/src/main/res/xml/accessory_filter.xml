@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- AOA 协议只有在 APP 主动发起时，才会被响应，就算使用了通用标识符放行所有配件模式下的设备，也必需得要 APP 主动发起了 AOA 协议才会真正有效 -->
     <usb-accessory model="*" manufacturer="*" version="*"/>
 </resources>
