@@ -6,6 +6,9 @@
 - Android 17 - Android 7.0
 - Android TV
 
+## Telegram
+- [https://t.me/nekoStudioC](https://t.me/nekoStudioC)
+
 ## Mode
 - [x] ROOT
 - [x] Shell
