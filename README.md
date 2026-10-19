@@ -7,7 +7,7 @@
 - Android TV
 
 ## Telegram
-- [https://t.me/neko_1145141919810](https://t.me/neko_1145141919810
+- [https://t.me/neko_1145141919810](https://t.me/neko_1145141919810)
 
 ## Mode
 - [x] ROOT
