@@ -423,6 +423,7 @@ class MainActivityViewModel(application: Application) : AndroidViewModel(applica
         FbCommand("fastboot reboot 可选参数", "reboot "),
         FbCommand("fastboot boot 文件名", "boot "),
         FbCommand("fastboot flash 分区 路径", "flash "),
+        FbCommand("fastboot --list 批量处理文件名", "fastboot --list "),
         FbCommand("查看当前安全补丁级别", "getvar security-patch-level"),
         FbCommand("查看当前最大下载限制", "getvar max-download-size"),
         FbCommand("查看当前活跃的分区槽位（a 或 b)", "getvar current-slot"),

@@ -168,6 +168,9 @@ class FastbootManager(
     private val _logFlow = MutableSharedFlow<String>()
     val logFlow = _logFlow.asSharedFlow()
 
+    // 内部状态标记：记录上一条指令/刷写是否失败
+    private var isLastCommandFailed = false
+
     private suspend fun log(msg: String) {
         _logFlow.emit(msg)
     }
@@ -229,6 +232,17 @@ class FastbootManager(
         val action = parts[0].lowercase()
 
         when (action) {
+            "-l", "--list" -> {
+                if (parts.size >= 2) {
+                    performBatchFile(parts[1])
+                } else {
+                    withContext(Dispatchers.Main) {
+                        log("[error] 格式: --list <批处理文件名>")
+                    }
+                    isLastCommandFailed = true
+                }
+                return@withContext
+            }
             "flash" -> {
                 if (parts.size >= 3) {
                     performFlash(parts[1], parts[2])
@@ -236,6 +250,7 @@ class FastbootManager(
                     withContext(Dispatchers.Main) {
                         log("[error] 格式: flash 分区 文件名")
                     }
+                    isLastCommandFailed = true
                 }
                 return@withContext
             }
@@ -246,6 +261,7 @@ class FastbootManager(
                     withContext(Dispatchers.Main) {
                         log("[error] 格式: boot 文件名")
                     }
+                    isLastCommandFailed = true
                 }
                 return@withContext
             }
@@ -283,8 +299,66 @@ class FastbootManager(
         val result = waitForTerminalResponse(10000)
         withContext(Dispatchers.Main) {
             when (result.status) {
-                "FAIL" -> log("[error] 指令被拒绝: ${result.payload}")
-                "TIMEOUT" -> log("[Warn] 无响应: ${result.payload}")
+                "FAIL" -> {
+                    isLastCommandFailed = true
+                    log("[error] 指令被拒绝: ${result.payload}")
+                }
+                "TIMEOUT" -> {
+                    isLastCommandFailed = true
+                    log("[Warn] 无响应: ${result.payload}")
+                }
+                else -> {
+                    // 成功
+                }
+            }
+        }
+    }
+
+    /**
+     * 新增：从文件中读取 fastboot 命令进行批量执行（保持 Unit 返回值）
+     */
+    private suspend fun performBatchFile(inputPath: String) = withContext(Dispatchers.IO) {
+        val cleanFileName = inputPath.removePrefix("/")
+        val file = File(flashFolder, cleanFileName).takeif { it.exists() } 
+            ?: File(inputPath).takeif { it.exists() }
+
+        if (file == null || !file.exists()) {
+            withContext(Dispatchers.Main) {
+                log("[error] 批处理文件不存在 -> $inputPath (搜索路径: ${flashFolder.absolutePath})")
+            }
+            isLastCommandFailed = true
+            return@withContext
+        }
+
+        val lines = file.readLines()
+        withContext(Dispatchers.Main) {
+            log("[INFO] 开始执行批处理脚本: ${file.name} (共 ${lines.size} 行)")
+        }
+
+        isLastCommandFailed = false
+
+        for ((index, rawLine) in lines.withIndex()) {
+            val line = rawLine.trim()
+            // 过滤空行与注释
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+                continue
+            }
+
+            withContext(Dispatchers.Main) {
+                log("[INFO] [批处理进度 ${index + 1}/${lines.size}] 执行指令: $line")
+            }
+
+            // 重置状态并执行（协程会在此处挂起，严格等待上一条指令执行完毕）
+            isLastCommandFailed = false
+            executeCommandSync(line)
+
+            // 如果上一条指令执行失败，触发中断保护，退出循环
+            if (isLastCommandFailed) {
+                withContext(Dispatchers.Main) {
+                    log("[error] 批处理在第 ${index + 1} 行指令执行失败或被拒绝: [$line]")
+                    log("[error] 触发失败中断保护，后续指令已取消执行！")
+                }
+                break
             }
         }
     }
@@ -317,6 +391,7 @@ class FastbootManager(
         val file = File(flashFolder, cleanFileName)
 
         if (!file.exists()) {
+            isLastCommandFailed = true
             withContext(Dispatchers.Main) {
                 log("[error] 文件不存在 -> ${file.absolutePath}")
             }
@@ -363,6 +438,7 @@ class FastbootManager(
 
         val handshake = waitForTerminalResponse(10000)
         if (handshake.status != "DATA") {
+            isLastCommandFailed = true
             withContext(Dispatchers.Main) {
                 log("[error] 下载被拒绝: ${handshake.payload}")
             }
@@ -370,10 +446,14 @@ class FastbootManager(
         }
 
         val success = sendFileDataStreamUltra(file, 0, file.length(), speedMode)
-        if (!success) return
+        if (!success) {
+            isLastCommandFailed = true
+            return
+        }
 
         val downloadConfirm = waitForTerminalResponse(30000)
         if (downloadConfirm.status != "OKAY") {
+            isLastCommandFailed = true
             withContext(Dispatchers.Main) {
                 log("[error] 下载确认失败: ${downloadConfirm.payload}")
             }
@@ -384,6 +464,9 @@ class FastbootManager(
         val dynamicTimeout = 30000L + (file.length() / (100 * 1024 * 1024) * 10000L)
         val flashResult = waitForTerminalResponse(dynamicTimeout)
 
+        if (flashResult.status != "OKAY") {
+            isLastCommandFailed = true
+        }
         printFlashSummary(targetPartition, file.length(), startTime, flashResult)
     }
 
@@ -427,6 +510,7 @@ class FastbootManager(
 
             val handshake = waitForTerminalResponse(10000)
             if (handshake.status != "DATA") {
+                isLastCommandFailed = true
                 withContext(Dispatchers.Main) {
                     log("[error] 批次 $batchIndex 下载请求被拒绝")
                 }
@@ -458,15 +542,22 @@ class FastbootManager(
 
             // 4. 传输 RAW 文件中的数据片段
             val success = sendFileDataStreamUltra(file, offset, currentRawSize, speedMode)
-            if (!success) return
+            if (!success) {
+                isLastCommandFailed = true
+                return
+            }
 
             val downloadConfirm = waitForTerminalResponse(30000)
-            if (downloadConfirm.status != "OKAY") return
+            if (downloadConfirm.status != "OKAY") {
+                isLastCommandFailed = true
+                return
+            }
 
             // 5. 触发分片 Flash 指令
             sendFastbootCommandDirect("flash:$targetPartition")
             val flashResult = waitForTerminalResponse(120000)
             if (flashResult.status != "OKAY") {
+                isLastCommandFailed = true
                 withContext(Dispatchers.Main) {
                     log("[error] 批次 ${batchIndex + 1} 写入失败: ${flashResult.payload}")
                 }
@@ -558,7 +649,10 @@ class FastbootManager(
                 sendFastbootCommandDirect("download:$sizeHex")
 
                 val handshake = waitForTerminalResponse(10000)
-                if (handshake.status != "DATA") return
+                if (handshake.status != "DATA") {
+                    isLastCommandFailed = true
+                    return
+                }
 
                 // 1. 发送 Sub Sparse Header
                 val subHeaderBuffer = ByteBuffer.allocate(28).order(ByteOrder.LITTLE_ENDIAN).apply {
@@ -587,16 +681,26 @@ class FastbootManager(
                     usbConn.bulkTransfer(epOut, chunkHdrBytes, 12, 2000)
 
                     if (payloadSize > 0) {
-                        sendFileDataStreamUltra(file, offset, payloadSize, speedMode)
+                        val success = sendFileDataStreamUltra(file, offset, payloadSize, speedMode)
+                        if (!success) {
+                            isLastCommandFailed = true
+                            return
+                        }
                     }
                 }
 
                 val downloadConfirm = waitForTerminalResponse(30000)
-                if (downloadConfirm.status != "OKAY") return
+                if (downloadConfirm.status != "OKAY") {
+                    isLastCommandFailed = true
+                    return
+                }
 
                 sendFastbootCommandDirect("flash:$targetPartition")
                 val flashResult = waitForTerminalResponse(120000)
-                if (flashResult.status != "OKAY") return
+                if (flashResult.status != "OKAY") {
+                    isLastCommandFailed = true
+                    return
+                }
             }
 
             printFlashSummary(targetPartition, file.length(), startTime, FastbootResponse("OKAY", "", emptyList()))
@@ -673,6 +777,7 @@ class FastbootManager(
                 return@withContext true
             }
         } catch (e: Exception) {
+            isLastCommandFailed = true
             withContext(Dispatchers.Main) {
                 log("[error] 高速传输异常: ${e.message}")
             }
@@ -689,6 +794,7 @@ class FastbootManager(
         val extension = "." + cleanFileName.substringAfterLast(".", "").lowercase()
 
         if (!file.exists()) {
+            isLastCommandFailed = true
             withContext(Dispatchers.Main) {
                 log("[error] 找不到引导文件 -> ${file.absolutePath}")
             }
@@ -704,6 +810,7 @@ class FastbootManager(
         // 1. 检查 Boot 镜像大小是否超出 RAM 接收上限（Boot 镜像无法分块）
         val maxDownloadSize = getMaxDownloadSize()
         if (file.length() > maxDownloadSize) {
+            isLastCommandFailed = true
             withContext(Dispatchers.Main) {
                 log("[error] 引导镜像体积 (${file.length() / 1024 / 1024} MB) 超出设备 RAM 允许的最大下载限制 (${maxDownloadSize / 1024 / 1024} MB)，无法引导！")
             }
@@ -722,6 +829,7 @@ class FastbootManager(
     
             val handshake = waitForTerminalResponse(10000)
             if (handshake.status != "DATA") {
+                isLastCommandFailed = true
                 withContext(Dispatchers.Main) {
                     log("[error] 下载请求被拒绝: ${handshake.payload}")
                 }
@@ -730,10 +838,14 @@ class FastbootManager(
 
             // 3. 高速推送数据包
             val success = sendFileDataStreamUltra(file, 0, file.length(), speedMode)
-            if (!success) return@withContext
+            if (!success) {
+                isLastCommandFailed = true
+                return@withContext
+            }
 
             val downloadConfirm = waitForTerminalResponse(30000)
             if (downloadConfirm.status != "OKAY") {
+                isLastCommandFailed = true
                 withContext(Dispatchers.Main) {
                     log("[error] 镜像传输校验失败: ${downloadConfirm.payload}")
                 }
@@ -761,6 +873,7 @@ class FastbootManager(
                     log("[OKAY] 引导命令已触发！(耗时: ${"%.2f".format(duration)}s)")
                     log("[INFO] 提示: 若设备卡在 logo，Android 12+ 设备请确认是否需要引导 init_boot 或 vendor_boot。")
                 } else {
+                    isLastCommandFailed = true
                     log("[error] 引导失败: ${bootResult.payload}")
                 }
             }
@@ -816,6 +929,7 @@ class FastbootManager(
                 val speedMbps = if (durationSeconds > 0) (totalBytes / (1024.0 * 1024.0)) / durationSeconds else 0.0
                 log("[OKAY] 分区 $targetPartition 刷写成功！耗时: ${"%.2f".format(durationSeconds)}s | 平均速度: ${"%.2f".format(speedMbps)} MB/s")
             } else {
+                isLastCommandFailed = true
                 log("[error] 分区 $targetPartition 刷写失败: ${result.payload}")
             }
         }
