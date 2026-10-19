@@ -16,6 +16,7 @@ android-buildTools-version = "37.0.0"
 cmake-version = "4.4.2"
 
 kotlinxCoroutines = "1.11.0"
+kotlinxSerializations = "1.12.0"
 ktor = "3.6.0"
 annotation = "1.11.0"
 coreKtx = "1.19.1"
@@ -61,8 +62,8 @@ androidx-lifecycle-service = { group = "androidx.lifecycle", name = "lifecycle-s
 # kotlinx 协程
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
-kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxCoroutines" }
-kotlinx-serialization-protobuf = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-protobuf", version.ref = "kotlinxCoroutines" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version.ref = "kotlinxSerializations" }
+kotlinx-serialization-protobuf = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-protobuf", version.ref = "kotlinxSerializations" }
 
 kotlin-ktor-utils = { group = "io.ktor", name = "ktor-utils", version.ref = "ktor" }
 kotlin-ktor-io = { group = "io.ktor", name = "ktor-io", version.ref = "ktor" }

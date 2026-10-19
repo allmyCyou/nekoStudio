@@ -1,11 +1,12 @@
 {
   "buildSystem": "Gradle",
-  "buildSystemVersion": "9.8.1", 
+  "buildSystemVersion": "9.8.2", 
   "buildPlugin": "org.jetbrains.kotlin.gradle.plugin.KotlinAndroidPluginWrapper",
   "buildPluginVersion": "2.5.0-Beta1",
   "projectSettings": {
     "androidGradlePlugin": "9.5.0-alpha10",
     "kotlinxCoroutines": "1.11.0",
+    "kotlinxSerializations": "1.12.0",
     "OpenSSL": "4.0.3",
     "composeBom": "2026.09.00",
     "org.lsposed.hiddenapibypass": "6.2",
