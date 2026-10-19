@@ -317,47 +317,49 @@ class FastbootManager(
     /**
      * 新增：从文件中读取 fastboot 命令进行批量执行（保持 Unit 返回值）
      */
-    private suspend fun performBatchFile(inputPath: String) = withContext(Dispatchers.IO) {
-        val cleanFileName = inputPath.removePrefix("/")
-        val file = File(flashFolder, cleanFileName)
+    private suspend fun performBatchFile(inputPath: String): Unit {
+        withContext(Dispatchers.IO) {
+            val cleanFileName = inputPath.removePrefix("/")
+            val file = File(flashFolder, cleanFileName)
 
-        if (!file.exists()) {
-            withContext(Dispatchers.Main) {
-                log("[error] 批处理文件不存在 -> $inputPath (搜索路径: ${flashFolder.absolutePath})")
-            }
-            isLastCommandFailed = true
-            return@withContext
-        }
-
-        val lines = file.readLines()
-        withContext(Dispatchers.Main) {
-            log("[INFO] 开始执行批处理脚本: ${file.name} (共 ${lines.size} 行)")
-        }
-
-        isLastCommandFailed = false
-
-        for ((index, rawLine) in lines.withIndex()) {
-            val line = rawLine.trim()
-            // 过滤空行与注释
-            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
-                continue
-            }
-
-            withContext(Dispatchers.Main) {
-                log("[INFO] [批处理进度 ${index + 1}/${lines.size}] 执行指令: $line")
-            }
-
-            // 重置状态并执行（协程会在此处挂起，严格等待上一条指令执行完毕）
-            isLastCommandFailed = false
-            executeCommandSync(line)
-
-            // 如果上一条指令执行失败，触发中断保护，退出循环
-            if (isLastCommandFailed) {
+            if (!file.exists()) {
                 withContext(Dispatchers.Main) {
-                    log("[error] 批处理在第 ${index + 1} 行指令执行失败或被拒绝: [$line]")
-                    log("[error] 触发失败中断保护，后续指令已取消执行！")
+                    log("[error] 批处理文件不存在 -> $inputPath (搜索路径: ${flashFolder.absolutePath})")
                 }
-                break
+                isLastCommandFailed = true
+                return@withContext
+            }
+
+            val lines = file.readLines()
+            withContext(Dispatchers.Main) {
+                log("[INFO] 开始执行批处理脚本: ${file.name} (共 ${lines.size} 行)")
+            }
+
+            isLastCommandFailed = false
+
+            for ((index, rawLine) in lines.withIndex()) {
+                val line = rawLine.trim()
+                // 过滤空行与注释
+                if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+                    continue
+                }
+
+                withContext(Dispatchers.Main) {
+                    log("[INFO] [批处理进度 ${index + 1}/${lines.size}] 执行指令: $line")
+                }
+
+                // 重置状态并执行（协程会在此处挂起，严格等待上一条指令执行完毕）
+                isLastCommandFailed = false
+                executeCommandSync(line)
+
+                // 如果上一条指令执行失败，触发中断保护，退出循环
+                if (isLastCommandFailed) {
+                    withContext(Dispatchers.Main) {
+                        log("[error] 批处理在第 ${index + 1} 行指令执行失败或被拒绝: [$line]")
+                        log("[error] 触发失败中断保护，后续指令已取消执行！")
+                    }
+                    break
+                }
             }
         }
     }
