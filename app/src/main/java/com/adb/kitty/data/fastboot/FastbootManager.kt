@@ -319,10 +319,9 @@ class FastbootManager(
      */
     private suspend fun performBatchFile(inputPath: String) = withContext(Dispatchers.IO) {
         val cleanFileName = inputPath.removePrefix("/")
-        val file = File(flashFolder, cleanFileName).takeif { it.exists() } 
-            ?: File(inputPath).takeif { it.exists() }
+        val file = File(flashFolder, cleanFileName)
 
-        if (file == null || !file.exists()) {
+        if (!file.exists()) {
             withContext(Dispatchers.Main) {
                 log("[error] 批处理文件不存在 -> $inputPath (搜索路径: ${flashFolder.absolutePath})")
             }
