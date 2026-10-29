@@ -2,9 +2,9 @@
   "buildSystem": "Gradle",
   "buildSystemVersion": "9.8.2", 
   "buildPlugin": "org.jetbrains.kotlin.gradle.plugin.KotlinAndroidPluginWrapper",
-  "buildPluginVersion": "2.5.0-Beta1",
+  "buildPluginVersion": "2.5.0-Beta2",
   "projectSettings": {
-    "androidGradlePlugin": "9.5.0-alpha10",
+    "androidGradlePlugin": "9.5.0-rc02",
     "kotlinxCoroutines": "1.11.0",
     "kotlinxSerializations": "1.12.0",
     "OpenSSL": "4.0.3",
