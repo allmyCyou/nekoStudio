@@ -592,6 +592,8 @@ class AdbSessionService : Service() {
         if (avatarFile.exists()) {
             runCatching {
                 srcBitmap = BitmapFactory.decodeFile(avatarFile.absolutePath)
+            }.onFailure { e ->
+                
             }
         }
 
@@ -611,6 +613,8 @@ class AdbSessionService : Service() {
                     it.recycle()
                     srcBitmap = dstBitmap
                 }
+            }.onFailure { e ->
+                
             }
         }
 
@@ -936,7 +940,7 @@ class AdbSessionService : Service() {
                         runCatching {
                             stream.write(exitMsg)
                             stream.flush()
-                        }
+                        }.getOrNull()
                     }
                 )
             } catch (e: Exception) {
@@ -950,6 +954,8 @@ class AdbSessionService : Service() {
                         writer.write(errorMsg)
                         writer.flush()
                     }
+                }.onFailure { e ->
+                    
                 }
             } finally {
                 synchronized(this) {
@@ -960,7 +966,7 @@ class AdbSessionService : Service() {
                         currentTaskKey = null
                     }
                 }
-                runCatching { os?.close() }
+                runCatching { os?.close() }.getOrNull()
                 process?.let { killProcessTree(it, taskKey) }
             }
         }
@@ -979,6 +985,8 @@ class AdbSessionService : Service() {
             if (!key.isNullOrEmpty()) {
                 runCatching {
                     Runtime.getRuntime().exec(arrayOf("sh", "-c", "pkill -9 -f '$key'"))
+                }.onFailure { e ->
+                    
                 }
             }
 
@@ -1050,14 +1058,14 @@ class AdbSessionService : Service() {
                 }
             } catch (_: Exception) {
             } finally {
-                runCatching { ipcOutputStream.close() }
+                runCatching { ipcOutputStream.close() }.getOrNull()
             }
         }, "IpcStreamWriter")
 
         ipcWriterThread.start()
 
-        runCatching { drainThread.join() }
-        runCatching { ipcWriterThread.join() }
+        runCatching { drainThread.join() }.onFailure { e -> }
+        runCatching { ipcWriterThread.join() }.onFailure { e -> }
     }
 
     private fun sanitizeCommand(cmd: String): String {
@@ -1091,6 +1099,8 @@ class AdbSessionService : Service() {
                     proc.destroyForciblyCompat()
                 }
             }
+        }.onFailure { e ->
+            
         }
     }
 
@@ -1134,6 +1144,8 @@ class AdbSessionService : Service() {
                     writer.write(message + "\n")
                     writer.flush()
                 }
+            }.onFailure { e ->
+                
             }
         }
     }

@@ -34,10 +34,10 @@ hiddenapibypassVersion = "6.2"
 nayukiQR = "1.8.0"
 lifecycle = "2.11.0"
 
-material3 = "1.5.0-beta01"
+material3 = "1.5.0-beta02"
 
 okio = "3.18.2"
-okhttp = "5.5.0"
+okhttp = "5.5.1"
 
 zxing = "3.5.4"
 annotationExperimental = "1.6.0"

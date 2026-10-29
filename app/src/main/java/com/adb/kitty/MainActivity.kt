@@ -1599,7 +1599,11 @@ class MainActivity : ComponentActivity() {
                         appendLog("[error] E: ${e.message}")
                     }
                 } finally {
-                    runCatching { pfd?.close() }
+                    try {
+                        pfd?.close()
+                    } catch (ignored: Exception) {
+                        // 静默忽略关闭文件时的异常
+                    }
                 }
             } else {
                 appendLog("[error] Service is not running")
@@ -1678,6 +1682,8 @@ class MainActivity : ComponentActivity() {
                         data = "package:$packageName".toUri()
                     }
                     allFilesPermissionLauncher.launch(intent)
+                }.onFailure { e ->
+                    
                 }
             }
         } else {

@@ -339,7 +339,7 @@ class AppDataFilesProvider : DocumentsProvider() {
 
         if (checkExists) {
             runCatching { Os.lstat(targetFile.path) }
-                .getOrElse { throw FileNotFoundException("$docId not found") }
+                .onFailure { throw FileNotFoundException("$docId not found") }
         }
         return targetFile
     }
@@ -400,6 +400,8 @@ class AppDataFilesProvider : DocumentsProvider() {
                         sb.append("|").append(Os.readlink(path))
                     }
                     add(COLUMN_MT_EXTRAS, sb.toString())
+                }.onFailure { e ->
+                    
                 }
             }
         }

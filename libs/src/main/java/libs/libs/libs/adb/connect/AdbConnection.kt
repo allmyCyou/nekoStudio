@@ -160,7 +160,7 @@ public class AdbConnection(
                                 if (!stream.isOpen) {
                                     stream.onOpenFailed("Received CLSE during stream OPEN")
                                 } else {
-                                    runCatching { stream.incomingChannel.trySend(packet) }
+                                    runCatching { stream.incomingChannel.trySend(packet) }.onFailure { e -> }
                                     stream.closeInternal()
                                 }
                             }
@@ -175,7 +175,7 @@ public class AdbConnection(
                             arg1 = packet.arg0,
                             payload = ByteArray(0)
                         )
-                        runCatching { sendPacket(closePacket) }
+                        runCatching { sendPacket(closePacket) }.onFailure { e -> }
                     }
                 }
             } finally {

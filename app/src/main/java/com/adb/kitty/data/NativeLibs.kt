@@ -39,6 +39,8 @@ object NativeLibs {
     init {
         runCatching {
             System.loadLibrary("native-lib")
+        }.onFailure { e ->
+            Log.e("com.adb.kitty.data.NativeLibs", "NOT_NATIVE_LIBS")
         }
     }
     /**
