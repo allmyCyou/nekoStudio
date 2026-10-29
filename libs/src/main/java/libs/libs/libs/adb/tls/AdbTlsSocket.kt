@@ -27,7 +27,7 @@ public class AdbTlsSocket(
     public val outputStream: OutputStream = sslSocket.outputStream
 
     public fun setSoTimeout(timeoutMs: Int) {
-        runCatching { sslSocket.soTimeout = timeoutMs }.getOrNull()
+        runCatching { sslSocket.soTimeout = timeoutMs }.onFailure { e -> }
     }
 
     public fun close() {

@@ -940,7 +940,7 @@ class AdbSessionService : Service() {
                         runCatching {
                             stream.write(exitMsg)
                             stream.flush()
-                        }.getOrNull()
+                        }.onFailure { e -> }
                     }
                 )
             } catch (e: Exception) {
@@ -966,7 +966,7 @@ class AdbSessionService : Service() {
                         currentTaskKey = null
                     }
                 }
-                runCatching { os?.close() }.getOrNull()
+                runCatching { os?.close() }.onFailure { e -> }
                 process?.let { killProcessTree(it, taskKey) }
             }
         }
@@ -1058,7 +1058,7 @@ class AdbSessionService : Service() {
                 }
             } catch (_: Exception) {
             } finally {
-                runCatching { ipcOutputStream.close() }.getOrNull()
+                runCatching { ipcOutputStream.close() }.onFailure { e -> }
             }
         }, "IpcStreamWriter")
 
@@ -1088,13 +1088,13 @@ class AdbSessionService : Service() {
                 if (!taskKey.isNullOrEmpty()) {
                     runCatching {
                         Runtime.getRuntime().exec(arrayOf("sh", "-c", "pkill -9 -f '$taskKey'"))
-                    }
+                    }.onFailure { e -> }
                 }
 
                 val pid = getProcessPid(proc)
                 if (pid > 1000) {
-                    runCatching { Runtime.getRuntime().exec(arrayOf("sh", "-c", "pkill -9 -P $pid")) }
-                    runCatching { Os.kill(pid, OsConstants.SIGKILL) }
+                    runCatching { Runtime.getRuntime().exec(arrayOf("sh", "-c", "pkill -9 -P $pid")) }.onFailure { e -> }
+                    runCatching { Os.kill(pid, OsConstants.SIGKILL) }.onFailure { e -> }
                 } else {
                     proc.destroyForciblyCompat()
                 }
