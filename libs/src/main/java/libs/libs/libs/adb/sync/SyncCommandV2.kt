@@ -11,22 +11,33 @@ public object SyncCommandV2 {
     public const val ID_SND2: String = "SND2"
     public const val ID_RCV2: String = "RCV2"
 
-    public fun createRequestV2(
-        id: String,
-        mode: Int,
-        flags: Int,
-        remotePath: String
-    ): ByteArray {
+    /** V2 通用请求头：id + path_length + path */
+    public fun createSyncRequest(id: String, remotePath: String): ByteArray {
         val pathBytes = remotePath.toByteArray(Charsets.UTF_8)
-        val buffer = ByteBuffer.allocate(16 + pathBytes.size)
+        return ByteBuffer.allocate(8 + pathBytes.size)
             .order(ByteOrder.LITTLE_ENDIAN)
+            .put(id.toByteArray(Charsets.US_ASCII))
+            .putInt(pathBytes.size)
+            .put(pathBytes)
+            .array()
+    }
 
-        buffer.put(id.toByteArray(Charsets.US_ASCII)) // 0..3 : ID
-        buffer.putInt(mode)                           // 4..7 : mode
-        buffer.putInt(flags)                          // 8..11: flags
-        buffer.putInt(pathBytes.size)                 // 12..15: path_len
-        buffer.put(pathBytes)                         // 16.. : remotePath
+    /** SND2 专用：路径发送后，追加 mode + flags */
+    public fun createSendV2(mode: Int, flags: Int): ByteArray {
+        return ByteBuffer.allocate(12)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put(ID_SND2.toByteArray(Charsets.US_ASCII))
+            .putInt(mode)
+            .putInt(flags)
+            .array()
+    }
 
-        return buffer.array()
+    /** RCV2 专用：路径发送后，追加 flags */
+    public fun createRecvV2(flags: Int): ByteArray {
+        return ByteBuffer.allocate(8)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put(ID_RCV2.toByteArray(Charsets.US_ASCII))
+            .putInt(flags)
+            .array()
     }
 }
