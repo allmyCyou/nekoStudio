@@ -462,7 +462,7 @@ public class AdbClient(
      * 2. 若 [local] 为目录：
      *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，远端基准目录为 `remotePath/local.name`
      *    - 否则远端基准目录为 `remotePath`
-     *    - 自动通过 shell.exec 预先建好远端所有文件夹（支持空目录），再依次上传所有子文件
+     *    - 批量通过 `shell.exec("mkdir -p ...")` 预建远端所有文件夹（支持空目录），再依次上传所有子文件
      */
     public suspend fun push(
         local: File,
@@ -482,41 +482,61 @@ public class AdbClient(
                     remotePath
                 }
                 pushFile(local, targetRemotePath, flags, onProgress).getOrThrow()
-            } else if (local.isDirectory) {
-                val baseRemoteDir = if (isRemoteDir) {
-                    "${remotePath.trimEnd('/')}/${local.name}"
-                } else {
-                    remotePath.trimEnd('/')
+                return@runCatching
+            }
+
+            // === 目录模式 ===
+            val baseRemoteDir = if (isRemoteDir) {
+                "${remotePath.trimEnd('/')}/${local.name}"
+            } else {
+                remotePath.trimEnd('/')
+            }
+
+            // 1. 收集所有目录目标路径（含 local 自身对应 baseRemoteDir）
+            val mkdirTargets = local.walkTopDown()
+                .filter { it.isDirectory }
+                .map { dir ->
+                    val relativePath = dir.relativeTo(local).path.replace('\\', '/')
+                    if (relativePath.isEmpty()) baseRemoteDir else "$baseRemoteDir/$relativePath"
                 }
+                .toList()
 
-                // 1. 优先预建立远端完整目录树（包括空目录）
-                val dirs = local.walkTopDown().filter { it.isDirectory }
-                    .map { dir ->
-                        val rel = dir.relativeTo(local).path.replace('\\', '/')
-                        if (rel.isEmpty()) baseRemoteDir else "$baseRemoteDir/$rel"
-                    }.toList()
-
-                if (dirs.isNotEmpty()) {
-                    val escaped = dirs.joinToString(" ") { "'${it.replace("'", "'\\''")}'" }
-                    shell.exec("mkdir -p $escaped")
+            // 2. 分批 mkdir -p，避免单条 shell 命令过长被截断
+            if (mkdirTargets.isNotEmpty()) {
+                val batchSize = 50
+                mkdirTargets.chunked(batchSize).forEach { batch ->
+                    val escaped = batch.joinToString(" ") {
+                        "'${it.replace("'", "'\\''")}'"
+                    }
+                    val mkdirResult = shell.exec("mkdir -p $escaped")
+                    check(mkdirResult.isSuccess) {
+                        "批量创建远端目录失败: ${mkdirResult.stderr}"
+                    }
                 }
             }
 
-                // 2. 收集所有子文件计算总字节数并依次传输
-                val allFiles = local.walkTopDown().filter { it.isFile }.toList()
-                val totalBytes = allFiles.sumOf { it.length() }
-                var accumulatedBytes = 0L
+            // 3. 收集所有文件并统计总字节
+            val allFiles = local.walkTopDown().filter { it.isFile }.toList()
+            val totalBytes = allFiles.sumOf { it.length() }
+            var accumulatedBytes = 0L
 
-                for (file in allFiles) {
-                    val relativePath = file.relativeTo(local).path.replace('\\', '/')
-                    val targetPath = "$baseRemoteDir/$relativePath"
+            // 4. 依次传输，每个文件结束后对齐一次进度
+            for (file in allFiles) {
+                val relativePath = file.relativeTo(local).path.replace('\\', '/')
+                val targetPath = "$baseRemoteDir/$relativePath"
+                val currentFileSize = file.length()
 
-                    pushFile(file, targetPath, flags) { fileWritten, _ ->
-                        onProgress?.invoke(accumulatedBytes + fileWritten, totalBytes)
-                    }.getOrThrow()
+                pushFile(file, targetPath, flags) { fileWritten, _ ->
+                    onProgress?.invoke(accumulatedBytes + fileWritten, totalBytes)
+                }.getOrThrow()
 
-                    accumulatedBytes += file.length()
-                }
+                accumulatedBytes += currentFileSize
+                onProgress?.invoke(accumulatedBytes, totalBytes)
+            }
+
+            // 空目录场景兜底（totalBytes = 0，上面的循环不会触发任何回调）
+            if (totalBytes == 0L) {
+                onProgress?.invoke(0L, 0L)
             }
         }
     }
@@ -543,60 +563,83 @@ public class AdbClient(
             val isRemoteDir = isRemoteDirectory(remotePath) || remotePath.endsWith("/")
 
             if (!isRemoteDir) {
-                val targetLocalFile = if (local.isDirectory || local.path.endsWith(File.separator) || local.path.endsWith("/")) {
+                // === 单文件模式 ===
+                val targetLocalFile = if (local.isDirectory ||
+                    local.path.endsWith(File.separator) || local.path.endsWith("/")
+                ) {
                     File(local, remotePath.trimEnd('/').substringAfterLast('/'))
                 } else {
                     local
                 }
-                pullFile(remotePath, targetLocalFile, flags, onProgress).getOrThrow()
+
+                var progressCalled = false
+                pullFile(remotePath, targetLocalFile, flags) { read, total ->
+                    progressCalled = true
+                    onProgress?.invoke(read, total)
+                }.getOrThrow()
+    
+                // 空文件场景：pullV2 内部没有 DATA 块，不会触发 onProgress，这里补一次
+                if (!progressCalled) {
+                    onProgress?.invoke(0L, 0L)
+                }
+                return@runCatching
+            }
+
+            // === 目录模式 ===
+            val remoteCleanPath = remotePath.trimEnd('/')
+            val remoteDirName = remoteCleanPath.substringAfterLast('/')
+
+            // 1. 计算并固化 baseLocalDir 的 canonical 路径
+            val baseLocalDirRaw = if (local.exists() && local.isDirectory) {
+                File(local, remoteDirName)
             } else {
-                val remoteCleanPath = remotePath.trimEnd('/')
-                val baseLocalDir = if (local.exists() && local.isDirectory) {
-                    File(local, remoteCleanPath.substringAfterLast('/'))
-                } else {
-                    local
+                local
+            }
+            baseLocalDirRaw.mkdirs()
+
+            val canonicalBase = baseLocalDirRaw.canonicalFile
+            val canonicalBasePath = canonicalBase.path
+            val canonicalBasePrefix = canonicalBasePath + File.separator
+
+            fun ensureInsideBase(target: File, relativePath: String) {
+                val canonicalDest = target.canonicalPath
+                if (canonicalDest != canonicalBasePath && !canonicalDest.startsWith(canonicalBasePrefix)) {
+                    throw SecurityException("检测到非法路径穿越尝试: $relativePath")
                 }
+            }
 
-                // 1. 扫描远端全量节点（目录 + 文件）
-                val remoteNodes = scanRemoteTree(remoteCleanPath)
-                val remoteFiles = remoteNodes.filter { !it.isDirectory }
-                val totalBytes = remoteFiles.sumOf { it.size }
-                var accumulatedBytes = 0L
+            // 2. 扫描远端全量节点（目录 + 文件）
+            val remoteNodes = scanRemoteTree(remoteCleanPath)
+            val remoteFiles = remoteNodes.filter { !it.isDirectory }
+            val totalBytes = remoteFiles.sumOf { it.size }
+            var accumulatedBytes = 0L
 
-                // 2. 提前在本地重建所有目录结构（包含空目录）
-                baseLocalDir.mkdirs()
-                for (dirNode in remoteNodes.filter { it.isDirectory }) {
-                    val targetLocalDir = File(baseLocalDir, dirNode.relativePath)
+            // 3. 提前在本地重建所有目录结构（含空目录）
+            for (dirNode in remoteNodes.filter { it.isDirectory }) {
+                val targetLocalDir = File(canonicalBase, dirNode.relativePath)
+                ensureInsideBase(targetLocalDir, dirNode.relativePath)
+                targetLocalDir.mkdirs()
+            }
 
-                    // 路径穿越安全防护 (Zip Slip Protection)
-                    val canonicalDest = targetLocalDir.canonicalPath
-                    val canonicalBase = baseLocalDir.canonicalFile
+            // 4. 依次拉取各文件，每个文件结束后对齐一次进度
+            for (item in remoteFiles) {
+                val targetLocalFile = File(canonicalBase, item.relativePath)
+                ensureInsideBase(targetLocalFile, item.relativePath)
+                // 兜底：极少数情况下 listV2 未返回某个中间目录，这里再保证父目录存在
+                targetLocalFile.parentFile?.mkdirs()
 
-                    val target = File(canonicalBase, relativePath)
-                    if (!target.canonicalPath.startsWith(canonicalBase.path + File.separator)) {
-                        throw SecurityException("检测到非法路径穿越尝试")
-                    }
-                    targetLocalDir.mkdirs()
-                }
+                val fileSize = item.size
+                pullFile(item.remotePath, targetLocalFile, flags) { fileRead, _ ->
+                    onProgress?.invoke(accumulatedBytes + fileRead, totalBytes)
+                }.getOrThrow()
 
-                // 3. 依次拉取各个文件
-                for (item in remoteFiles) {
-                    val targetLocalFile = File(baseLocalDir, item.relativePath)
+                accumulatedBytes += fileSize
+                onProgress?.invoke(accumulatedBytes, totalBytes)
+            }
 
-                    val canonicalDest = targetLocalFile.canonicalPath
-                    val canonicalBase = baseLocalDir.canonicalFile
-
-                    val target = File(canonicalBase, relativePath)
-                    if (!target.canonicalPath.startsWith(canonicalBase.path + File.separator)) {
-                        throw SecurityException("检测到非法路径穿越尝试")
-                    }
-
-                    pullFile(item.remotePath, targetLocalFile, flags) { fileRead, _ ->
-                        onProgress?.invoke(accumulatedBytes + fileRead, totalBytes)
-                    }.getOrThrow()
-
-                    accumulatedBytes += item.size
-                }
+            // 全空目录 / 全空文件场景兜底
+            if (totalBytes == 0L) {
+                onProgress?.invoke(0L, 0L)
             }
         }
     }
