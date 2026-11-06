@@ -50,18 +50,6 @@ public class AdbAbbClient(
         }
     }
 
-    private suspend fun probeAbbExec(): Boolean {
-        return try {
-            val stream = connection.openStream("abb_exec:package\u0000path\u0000android") ?: return false
-            val buffer = ByteArray(1024)
-            val n = stream.read(buffer) ?: 0
-            stream.close()
-            n >= 0
-        } catch (_: Exception) {
-            false
-        }
-    }
-
     public suspend fun execAbb(args: List<String>): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         val destination = buildDestination(args)
