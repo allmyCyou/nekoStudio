@@ -1120,7 +1120,7 @@ class MainActivity : ComponentActivity() {
                                     // chunk.data 已是 LineBuffer 剥离了 \n/\r\n 的单行字节数组
                                     val line = String(chunk.data, Charsets.UTF_8)
                                     if (line.isNotEmpty()) {
-                                        // 若你的 appendLog 接受独立单行，直接传入即可；若需换行符可传 "$line\n"
+                                        // 独立单行，直接传入
                                         appendLog(line)
                                     }
                                 }
@@ -1336,11 +1336,14 @@ class MainActivity : ComponentActivity() {
 
                         activeSessionJob = lifecycleScope.launch {
                             try {
-                                streamFlow.collect { chunk ->
+                                // 慢速模式
+                                streamFlow
+                                    .sample(200.milliseconds)
+                                    .collect { chunk ->
                                     // chunk.data 已是 LineBuffer 剥离了 \n/\r\n 的单行字节数组
                                     val line = String(chunk.data, Charsets.UTF_8)
                                     if (line.isNotEmpty()) {
-                                        // 若你的 appendLog 接受独立单行，直接传入即可；若需换行符可传 "$line\n"
+                                        // 独立单行，直接传入
                                         appendLog(line)
                                     }
                                 }
