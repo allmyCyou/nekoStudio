@@ -43,16 +43,6 @@ import java.io.InputStream
 private class MdnsSuccessException : CancellationException("mDNS operation succeeded")
 
 /**
- * 远端节点（文件或目录）元数据
- */
-private data class RemoteNodeInfo(
-    val remotePath: String,
-    val relativePath: String,
-    val isDirectory: Boolean,
-    val size: Long
-)
-
-/**
  * 统一 ADB 客户端门面 (Facade)
  * 整合 Connection、Pair (SPAKE2)、Shell、ABB、Sync(V2)、Root、mDNS 自动发现 以及 USB Host/Accessory 模块
  */
@@ -456,13 +446,7 @@ public class AdbClient(
     /**
      * 增强 Push API：处理文件或目录树传输，并按标准 `adb push` 规范推算落地路径
      *
-     * 1. 若 [local] 为单个文件：
-     *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，文件落地为 `remotePath/local.name`
-     *    - 否则文件落地为 `remotePath`
-     * 2. 若 [local] 为目录：
-     *    - 当 [remotePath] 为已存在的目录或以 `/` 结尾，远端基准目录为 `remotePath/local.name`
-     *    - 否则远端基准目录为 `remotePath`
-     *    - 批量通过 `shell.exec("mkdir -p ...")` 预建远端所有文件夹（支持空目录），再依次上传所有子文件
+     * 采用流式遍历：不缓存 File / 路径列表，内存占用与目录规模无关
      */
     public suspend fun push(
         local: File,
@@ -475,6 +459,7 @@ public class AdbClient(
 
             val isRemoteDir = isRemoteDirectory(remotePath) || remotePath.endsWith("/")
 
+            // === 单文件模式 ===
             if (local.isFile) {
                 val targetRemotePath = if (isRemoteDir) {
                     "${remotePath.trimEnd('/')}/${local.name}"
@@ -492,36 +477,31 @@ public class AdbClient(
                 remotePath.trimEnd('/')
             }
 
-            // 1. 收集所有目录目标路径（含 local 自身对应 baseRemoteDir）
-            val mkdirTargets = local.walkTopDown()
-                .filter { it.isDirectory }
-                .map { dir ->
-                    val relativePath = dir.relativeTo(local).path.replace('\\', '/')
-                    if (relativePath.isEmpty()) baseRemoteDir else "$baseRemoteDir/$relativePath"
-                }
-                .toList()
-
-            // 2. 分批 mkdir -p，避免单条 shell 命令过长被截断
-            if (mkdirTargets.isNotEmpty()) {
-                val batchSize = 50
-                mkdirTargets.chunked(batchSize).forEach { batch ->
-                    val escaped = batch.joinToString(" ") {
-                        "'${it.replace("'", "'\\''")}'"
-                    }
-                    val mkdirResult = shell.exec("mkdir -p $escaped")
-                    check(mkdirResult.isSuccess) {
-                        "批量创建远端目录失败: ${mkdirResult.stderr}"
-                    }
+            // 1. 流式分批创建远端目录：每满 50 个目标就 flush 一次 mkdir -p
+            val dirBatch = ArrayList<String>(50)
+            val dirIter = local.walkTopDown().filter { it.isDirectory }.iterator()
+            while (dirIter.hasNext()) {
+                val dir = dirIter.next()
+                val relativePath = dir.relativeTo(local).path.replace('\\', '/')
+                dirBatch.add(if (relativePath.isEmpty()) baseRemoteDir else "$baseRemoteDir/$relativePath")
+                if (dirBatch.size >= 50) {
+                    flushMkdirBatch(dirBatch)
                 }
             }
+            flushMkdirBatch(dirBatch) // 处理最后不满 50 的尾巴
 
-            // 3. 收集所有文件并统计总字节
-            val allFiles = local.walkTopDown().filter { it.isFile }.toList()
-            val totalBytes = allFiles.sumOf { it.length() }
+            // 2. 第一遍流式遍历：仅统计总字节（不缓存）
+            var totalBytes = 0L
+            val statIter = local.walkTopDown().filter { it.isFile }.iterator()
+            while (statIter.hasNext()) {
+                totalBytes += statIter.next().length()
+            }
+
+            // 3. 第二遍流式遍历：逐个推送
             var accumulatedBytes = 0L
-
-            // 4. 依次传输，每个文件结束后对齐一次进度
-            for (file in allFiles) {
+            val fileIter = local.walkTopDown().filter { it.isFile }.iterator()
+            while (fileIter.hasNext()) {
+                val file = fileIter.next()
                 val relativePath = file.relativeTo(local).path.replace('\\', '/')
                 val targetPath = "$baseRemoteDir/$relativePath"
                 val currentFileSize = file.length()
@@ -534,7 +514,7 @@ public class AdbClient(
                 onProgress?.invoke(accumulatedBytes, totalBytes)
             }
 
-            // 空目录场景兜底（totalBytes = 0，上面的循环不会触发任何回调）
+            // 空目录场景兜底
             if (totalBytes == 0L) {
                 onProgress?.invoke(0L, 0L)
             }
@@ -545,13 +525,7 @@ public class AdbClient(
      * 增强 Pull API：处理文件或目录树从设备拉取，并按标准 `adb pull` 规范推算落地路径
      * 包含防路径穿越 (Path Traversal / Zip Slip) 安全校验
      *
-     * 1. 若 [remotePath] 为单文件：
-     *    - 当 [local] 为已存在目录或路径以分隔符结尾，落地文件为 `File(local, remoteFileName)`
-     *    - 否则落地文件为 `local`
-     * 2. 若 [remotePath] 为目录：
-     *    - 当 [local] 为已存在目录，本地基准目录为 `File(local, remoteDirName)`
-     *    - 否则本地基准目录为 `local`
-     *    - 递归扫描远端树结构，提前在本地重建所有目录（含空目录），再批量拉取文件
+     * 采用流式回调遍历：不缓存远端节点列表，内存占用与目录规模无关
      */
     public suspend fun pull(
         remotePath: String,
@@ -562,8 +536,8 @@ public class AdbClient(
         runCatching {
             val isRemoteDir = isRemoteDirectory(remotePath) || remotePath.endsWith("/")
 
+            // === 单文件模式 ===
             if (!isRemoteDir) {
-                // === 单文件模式 ===
                 val targetLocalFile = if (local.isDirectory ||
                     local.path.endsWith(File.separator) || local.path.endsWith("/")
                 ) {
@@ -577,8 +551,7 @@ public class AdbClient(
                     progressCalled = true
                     onProgress?.invoke(read, total)
                 }.getOrThrow()
-    
-                // 空文件场景：pullV2 内部没有 DATA 块，不会触发 onProgress，这里补一次
+
                 if (!progressCalled) {
                     onProgress?.invoke(0L, 0L)
                 }
@@ -608,34 +581,37 @@ public class AdbClient(
                 }
             }
 
-            // 2. 扫描远端全量节点（目录 + 文件）
-            val remoteNodes = scanRemoteTree(remoteCleanPath)
-            val remoteFiles = remoteNodes.filter { !it.isDirectory }
-            val totalBytes = remoteFiles.sumOf { it.size }
+            // 2. 第一遍扫描：只统计总字节
+            var totalBytes = 0L
+            walkRemoteTree(
+                baseRemoteDir = remoteCleanPath,
+                onFile = { _, size -> totalBytes += size }
+            )
+
+            // 3. 第二遍扫描：DFS 边建目录、边拉取文件（DFS 天然保证父目录先于子目录）
             var accumulatedBytes = 0L
+            walkRemoteTree(
+                baseRemoteDir = remoteCleanPath,
+                onDirectory = { relativePath ->
+                    val targetLocalDir = File(canonicalBase, relativePath)
+                    ensureInsideBase(targetLocalDir, relativePath)
+                    targetLocalDir.mkdirs()
+                },
+                onFile = { relativePath, size ->
+                    val targetLocalFile = File(canonicalBase, relativePath)
+                    ensureInsideBase(targetLocalFile, relativePath)
+                    // 兜底：极端情况下父目录可能未被单独回调（如 listV2 返回异常），保险建一次
+                    targetLocalFile.parentFile?.mkdirs()
 
-            // 3. 提前在本地重建所有目录结构（含空目录）
-            for (dirNode in remoteNodes.filter { it.isDirectory }) {
-                val targetLocalDir = File(canonicalBase, dirNode.relativePath)
-                ensureInsideBase(targetLocalDir, dirNode.relativePath)
-                targetLocalDir.mkdirs()
-            }
+                    val fullRemotePath = "$remoteCleanPath/$relativePath"
+                    pullFile(fullRemotePath, targetLocalFile, flags) { fileRead, _ ->
+                        onProgress?.invoke(accumulatedBytes + fileRead, totalBytes)
+                    }.getOrThrow()
 
-            // 4. 依次拉取各文件，每个文件结束后对齐一次进度
-            for (item in remoteFiles) {
-                val targetLocalFile = File(canonicalBase, item.relativePath)
-                ensureInsideBase(targetLocalFile, item.relativePath)
-                // 兜底：极少数情况下 listV2 未返回某个中间目录，这里再保证父目录存在
-                targetLocalFile.parentFile?.mkdirs()
-
-                val fileSize = item.size
-                pullFile(item.remotePath, targetLocalFile, flags) { fileRead, _ ->
-                    onProgress?.invoke(accumulatedBytes + fileRead, totalBytes)
-                }.getOrThrow()
-
-                accumulatedBytes += fileSize
-                onProgress?.invoke(accumulatedBytes, totalBytes)
-            }
+                    accumulatedBytes += size
+                    onProgress?.invoke(accumulatedBytes, totalBytes)
+                }
+            )
 
             // 全空目录 / 全空文件场景兜底
             if (totalBytes == 0L) {
@@ -659,16 +635,30 @@ public class AdbClient(
     }
 
     /**
-     * 递归扫描远端文件树结构（兼顾文件与目录节点）
+     * 流式分批 mkdir：发一条 `mkdir -p` 后清空批次
      */
-    private suspend fun scanRemoteTree(
+    private suspend fun flushMkdirBatch(batch: MutableList<String>) {
+        if (batch.isEmpty()) return
+        val escaped = batch.joinToString(" ") { "'${it.replace("'", "'\\''")}'" }
+        val result = shell.exec("mkdir -p $escaped")
+        check(result.isSuccess) { "批量创建远端目录失败: ${result.stderr}" }
+        batch.clear()
+    }
+
+    /**
+     * 回调式递归遍历远端文件树（流式，不缓存节点）
+     * - [onDirectory]：进入子目录前回调（父目录先于子目录）
+     * - [onFile]：遇到文件时回调
+     */
+    private suspend fun walkRemoteTree(
         baseRemoteDir: String,
         currentRelativeDir: String = "",
-        depth: Int = 0
-    ): List<RemoteNodeInfo> {
-        if (depth > 32) return emptyList()
+        depth: Int = 0,
+        onDirectory: (suspend (relativePath: String) -> Unit)? = null,
+        onFile: (suspend (relativePath: String, size: Long) -> Unit)? = null
+    ) {
+        if (depth > 64) return
 
-        val result = mutableListOf<RemoteNodeInfo>()
         val currentRemoteDir = if (currentRelativeDir.isEmpty()) {
             baseRemoteDir
         } else {
@@ -682,18 +672,15 @@ public class AdbClient(
             val fileName = stat.path.trimEnd('/').substringAfterLast('/')
             if (fileName == "." || fileName == ".." || fileName.isBlank()) continue
 
-            val relativePath = if (currentRelativeDir.isEmpty()) fileName else "$currentRelativeDir/$fileName"
-            val fullRemotePath = "$baseRemoteDir/$relativePath"
+            val relativePath = if (currentRelativeDir.isEmpty()) fileName
+                               else "$currentRelativeDir/$fileName"
 
             if (stat.isDirectory) {
-                // 记录目录节点本身（确保存在空目录时也能成功落地）
-                result.add(RemoteNodeInfo(fullRemotePath, relativePath, isDirectory = true, size = 0L))
-                result.addAll(scanRemoteTree(baseRemoteDir, relativePath, depth + 1))
+                onDirectory?.invoke(relativePath)
+                walkRemoteTree(baseRemoteDir, relativePath, depth + 1, onDirectory, onFile)
             } else if (stat.isFile) {
-                result.add(RemoteNodeInfo(fullRemotePath, relativePath, isDirectory = false, size = stat.size))
+                onFile?.invoke(relativePath, stat.size)
             }
         }
-
-        return result
     }
 }
