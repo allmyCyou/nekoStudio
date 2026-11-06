@@ -490,17 +490,17 @@ public class AdbClient(
                 }
 
                 // 1. 优先预建立远端完整目录树（包括空目录）
-                val allDirs = local.walkTopDown().filter { it.isDirectory }.toList()
-                for (dir in allDirs) {
-                    val relativePath = dir.relativeTo(local).path.replace('\\', '/')
-                    val targetRemoteDir = if (relativePath.isEmpty()) {
-                        baseRemoteDir
-                    } else {
-                        "$baseRemoteDir/$relativePath"
-                    }
-                    // 调用 shell.exec 在远端建好目录节点
-                    shell.exec("mkdir -p \"${targetRemoteDir.replace("\"", "\\\"")}\"")
+                val dirs = local.walkTopDown().filter { it.isDirectory }
+                    .map { dir ->
+                        val rel = dir.relativeTo(local).path.replace('\\', '/')
+                        if (rel.isEmpty()) baseRemoteDir else "$baseRemoteDir/$rel"
+                    }.toList()
+
+                if (dirs.isNotEmpty()) {
+                    val escaped = dirs.joinToString(" ") { "'${it.replace("'", "'\\''")}'" }
+                    shell.exec("mkdir -p $escaped")
                 }
+            }
 
                 // 2. 收集所有子文件计算总字节数并依次传输
                 val allFiles = local.walkTopDown().filter { it.isFile }.toList()
@@ -570,9 +570,11 @@ public class AdbClient(
 
                     // 路径穿越安全防护 (Zip Slip Protection)
                     val canonicalDest = targetLocalDir.canonicalPath
-                    val canonicalBase = baseLocalDir.canonicalPath
-                    if (!canonicalDest.startsWith(canonicalBase)) {
-                        throw SecurityException("检测到非法路径穿越尝试: ${dirNode.relativePath}")
+                    val canonicalBase = baseLocalDir.canonicalFile
+
+                    val target = File(canonicalBase, relativePath)
+                    if (!target.canonicalPath.startsWith(canonicalBase.path + File.separator)) {
+                        throw SecurityException("检测到非法路径穿越尝试")
                     }
                     targetLocalDir.mkdirs()
                 }
@@ -582,9 +584,11 @@ public class AdbClient(
                     val targetLocalFile = File(baseLocalDir, item.relativePath)
 
                     val canonicalDest = targetLocalFile.canonicalPath
-                    val canonicalBase = baseLocalDir.canonicalPath
-                    if (!canonicalDest.startsWith(canonicalBase)) {
-                        throw SecurityException("检测到非法路径穿越尝试: ${item.relativePath}")
+                    val canonicalBase = baseLocalDir.canonicalFile
+
+                    val target = File(canonicalBase, relativePath)
+                    if (!target.canonicalPath.startsWith(canonicalBase.path + File.separator)) {
+                        throw SecurityException("检测到非法路径穿越尝试")
                     }
 
                     pullFile(item.remotePath, targetLocalFile, flags) { fileRead, _ ->

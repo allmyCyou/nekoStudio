@@ -40,28 +40,40 @@ public class AdbAbbClient(
      */
     public fun canTryAbb(): Boolean = isAbbSupportedCache != false
 
-    private fun buildDestination(servicePrefix: String, args: List<String>): String {
+    private fun buildDestination(args: List<String>): String {
         return buildString {
-            append(servicePrefix)
-            args.forEach { arg ->
-                append(arg)
+            append("abb_exec:")
+            args.forEach {
+                append(it)
                 append('\u0000')
             }
         }
     }
 
+    private suspend fun probeAbbExec(): Boolean {
+        return try {
+            val stream = connection.openStream("abb_exec:package\u0000path\u0000android") ?: return false
+            val buffer = ByteArray(1024)
+            val n = stream.read(buffer) ?: 0
+            stream.close()
+            n >= 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     public suspend fun execAbb(args: List<String>): ShellCommandResult = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
-        val destination = buildDestination("abb:", args)
-        
+        val destination = buildDestination(args)
+
         val stream = connection.openStream(destination)
             ?: run {
                 isAbbSupportedCache = false
                 return@withContext ShellCommandResult(
                     exitCode = -1,
                     stdout = "",
-                    stderr = "ABB service not supported by adbd (Stream rejected)",
-                    durationMs = System.currentTimeMillis() - startTime
+                    stderr = "ABB service not supported",
+                    durationMs = 0
                 )
             }
 
@@ -269,27 +281,31 @@ public class AdbAbbClient(
     private suspend fun writeApkToAbbStream(
         sessionId: String,
         splitName: String,
-        apkStream: InputStream,
+        stream: InputStream,
         size: Long,
         onProgress: ((Long, Long) -> Unit)?
     ) {
-        val writeDestination = buildDestination(
-            "abb_exec:",
-            listOf("package", "install-write", "-S", size.toString(), sessionId, splitName, "-")
+        val args = listOf(
+            "package", "install-write", "-S", size.toString(),
+            sessionId, splitName, "-"
         )
-        val writeStream = connection.openStream(writeDestination)
-            ?: throw IllegalStateException("Failed to open install-write stream for $splitName")
+        val destination = buildString {
+            append("abb_exec:")
+            args.forEach { append(it); append('\u0000') }
+        }
+
+        val writeStream = connection.openStream(destination)
+            ?: throw IllegalStateException("abb_exec install-write stream rejected")
 
         try {
             val buffer = ByteArray(64 * 1024)
-            var bytesWritten = 0L
-            var read: Int
-            while (apkStream.read(buffer).also { read = it } != -1) {
-                if (read > 0) {
-                    val chunk = if (read == buffer.size) buffer else buffer.copyOf(read)
-                    writeStream.write(chunk)
-                    bytesWritten += read
-                    onProgress?.invoke(bytesWritten, size)
+            var written = 0L
+            var n: Int
+            while (stream.read(buffer).also { n = it } != -1) {
+                if (n > 0) {
+                    writeStream.write(if (n == buffer.size) buffer else buffer.copyOf(n))
+                    written += n
+                    onProgress?.invoke(written, size)
                 }
             }
         } finally {
