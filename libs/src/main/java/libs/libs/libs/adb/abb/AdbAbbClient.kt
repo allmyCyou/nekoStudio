@@ -129,9 +129,10 @@ public class AdbAbbClient(
                     return@runCatching
                 }
 
-                if (isAbbSupportedCache == false) {
-                    // 继续往下走 Legacy 流程
+                if (isAbbSupportedCache != true) {
+                    // null（未探测）或 false（确认不支持）→ 都降级试试
                 } else {
+                    // true（真的成功执行过 abb 命令）→ 失败就抛异常
                     abbResult.getOrThrow()
                 }
             }
