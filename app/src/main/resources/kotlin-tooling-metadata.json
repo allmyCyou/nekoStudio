@@ -1,6 +1,6 @@
 {
   "buildSystem": "Gradle",
-  "buildSystemVersion": "9.8.2", 
+  "buildSystemVersion": "9.9.0", 
   "buildPlugin": "org.jetbrains.kotlin.gradle.plugin.KotlinAndroidPluginWrapper",
   "buildPluginVersion": "2.5.0-Beta2",
   "projectSettings": {
